@@ -1,0 +1,11 @@
+.env
+.env.local
+data/*.db
+data/*.db-journal
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+playwright_state/
+.pytest_cache/

@@ -1,0 +1,31 @@
+[project]
+name = "linkedin-agent"
+version = "0.1.0"
+description = "LinkedIn outreach agent driven by Claude Code"
+requires-python = ">=3.11"
+dependencies = [
+    "playwright>=1.48",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+    "click>=8.1",
+    "pydantic>=2.8",
+    "rich>=13.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+linkedin-agent = "linkedin_agent.cli:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "live: hits the real Unipile API — skipped unless explicitly selected with -m live",
+]
+# By default, exclude live tests from `pytest` (no args). Run them with: pytest -m live
+addopts = "-m 'not live'"
