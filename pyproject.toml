@@ -13,7 +13,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = [
+    "pytest>=8.0",
+    "freezegun>=1.4",
+]
 
 [project.scripts]
 linkedin-agent = "linkedin_agent.cli:cli"
@@ -25,7 +28,11 @@ build-backend = "hatchling.build"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "live: hits the real Unipile API — skipped unless explicitly selected with -m live",
+    "unit: pure-function logic tests, no DB or network",
+    "integration: subprocess CLI / DB / mocked external services",
+    "slow: slow integration tests (e.g. setup.sh that creates a fresh venv)",
+    "live: hits the real Unipile or Telegram API",
+    "live_write: live test that produces side effects on real LinkedIn (invite/dm)",
 ]
-# By default, exclude live tests from `pytest` (no args). Run them with: pytest -m live
-addopts = "-m 'not live'"
+# By default, exclude live + slow tests. Run with `pytest -m slow` or `-m live`.
+addopts = "-m 'not live and not live_write and not slow'"

@@ -73,6 +73,11 @@ class _UnipileMessages:
 def poll_once(cfg: Config, limit: int = DEFAULT_BATCH, notify: bool = True) -> PollResult:
     """Run one polling cycle. Returns a summary so cron-driven callers can log it."""
     db.init_db()
+    if not (cfg.unipile_api_key and cfg.unipile_account_id and cfg.unipile_dsn):
+        # Polling requires Unipile. Skip gracefully (e.g. when running daily
+        # in tests with a fake adapter).
+        return PollResult(fetched=0, new_inbound=0, matched_prospects=0,
+                          notifications_sent=0, skipped_unknown_sender=0)
     msg_client = _UnipileMessages(cfg)
     tg: TelegramClient | None = None
     if notify:

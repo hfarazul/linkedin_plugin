@@ -1,28 +1,42 @@
-# LinkedIn Outreach Agent
+# LinkedIn Outreach Agent — Software Agency Lead-Gen
 
-This project is a CLI-driven LinkedIn outreach agent. **You (Claude Code) are the agent.** The Python package `linkedin_agent` is the toolkit you call.
+This project runs LinkedIn outreach for a software agency. **You (Claude Code) are the agent.** The Python package `linkedin_agent` is the toolkit you drive.
 
-## How to operate
+Day-to-day, most operations are automated by cron. You're invoked when there's *judgment* to apply: writing a campaign brief, drafting a custom message, replying to an interested prospect.
 
-Always work through the CLI rather than writing one-off scripts. The CLI handles rate limits, the action log, dry-run mode, and status transitions for you.
+## The system in 30 seconds
 
 ```
-python -m linkedin_agent <subcommand> [args]
+campaign brief (markdown)
+        │
+        ▼
+hourly cron (`linkedin daily`)
+        │  - syncs campaigns from markdown files
+        │  - polls Unipile for inbound replies
+        │  - reacts to targeted prospects' recent posts
+        │  - drafts connect notes / DM1 / DM2 / DM3 via the message-drafter subagent
+        ▼
+Telegram bot (drafts post with Approve/Edit/Reject buttons)
+        │
+        ▼  user taps on phone
+Unipile API → LinkedIn
 ```
 
-Subcommands:
+Drafts approved outside business hours stay queued (`status='approved'`) until the next 9-5 Mon-Fri window.
 
-| Command | Purpose |
-|---|---|
-| `init` | Create the SQLite DB. Run once. |
-| `auth` | Interactive LinkedIn login (Playwright backend only). |
-| `search "<query>" --limit N` | Search LinkedIn and import N prospects. |
-| `pipeline [--status STATUS]` | Show prospects, optionally filtered. |
-| `posts <prospect_id>` | Show a prospect's recent posts. |
-| `react <prospect_id> [--reaction LIKE]` | React to their latest post → status `reacted`. |
-| `connect <prospect_id> [--note "…"]` | Send a connection request → `connection_sent`. |
-| `dm <prospect_id> "<body>"` | Send a DM → `dm_sent`. |
-| `caps` | Show today's usage vs. daily caps. |
+## Campaign-first workflow
+
+Every prospect belongs to a campaign. Campaigns are markdown files under `campaigns/`:
+
+```
+campaigns/
+├── ai-dev-pod.md       # AI engineering pod offering, Series A-C SaaS founders
+├── rails-rescue.md     # Rails performance/refactor for established teams
+```
+
+Each file has YAML frontmatter (slug, name, status, target_icp) plus a markdown body with the pitch, pain points, proof points, and desired tone. The drafter reads the file when generating messages, so editing the brief immediately changes the drafted output.
+
+To create one: `linkedin campaign create <slug>` scaffolds the file; edit it; `linkedin campaign sync` (or any `daily` run) refreshes the DB.
 
 ## Pipeline stages
 
@@ -30,44 +44,95 @@ Subcommands:
 targeted → reacted → connection_sent → connected → dm_sent → replied
 ```
 
-`connected` and `replied` are set manually for now (LinkedIn doesn't reliably push these to us). Check `pipeline --status connection_sent` periodically and promote prospects you see have accepted.
+Plus a `disposition` column (set after conversation begins):
+`interested · not_fit · ghosted · won · lost · deferred`
 
-## Standard outreach playbook
+`ghosted` auto-applies 14 days after DM3 with no reply. The others are manual flags the user sets after talking to the prospect.
 
-When the user says "do today's outreach" or similar, follow this sequence:
+## Daily ops — what the cron does
 
-1. `caps` — confirm we have budget left for the day.
-2. `pipeline --status targeted` — list prospects awaiting first touch.
-3. For each `targeted` prospect, in order, up to the remaining reaction cap:
-   - `posts <id> --limit 1` to see what they posted.
-   - If recent post is relevant to their work (not a generic share), `react <id>`.
-   - If no recent posts, skip (don't connect cold without a reason).
-4. `pipeline --status reacted` — prospects we've warmed up.
-5. For each, send `connect <id> --note "<personalized 1-line note>"`. The note must reference their post or role; never use a generic template.
-6. `pipeline --status connected` — accepted invites.
-7. For each, send a `dm` that opens with the connection context (their post, mutual interest), not a pitch.
+| Step | What | Approval needed |
+|---|---|---|
+| `campaigns sync` | Refresh DB from markdown files | — |
+| `poll` | Fetch inbound replies, halt sequences, notify Telegram | — |
+| `react` | Like recent post of each `targeted` prospect → `reacted` | No (low stakes) |
+| `connect` | Draft connect note for each `reacted` prospect | **Yes (Telegram)** |
+| `dm1` | Draft first DM for each `connected` prospect with `dm_count=0` | **Yes (Telegram)** |
+| `followup` | Draft DM2 (after 4d) / DM3 (after 11d) for `dm_sent` prospects | **Yes (Telegram)** |
+| `send-approved` | Flush drafts approved outside the business-hours window | — |
+| `auto-ghost` | Mark stale `dm_count=3` prospects as `ghosted` | — |
 
-## Personalization rules
+You as the agency owner only see Telegram approval cards on your phone. Tap to approve, swipe to reject, tap Edit + reply to rewrite.
 
-- Notes and DMs must reference something specific: a post, a project, their company's recent news.
-- Never write "I came across your profile" or any variant of "I noticed you…". These are spam tells.
-- Keep notes ≤ 300 chars (LinkedIn limit). Aim for 200.
-- DMs: 2-3 short paragraphs max. No links in the first message.
+## When Claude Code is needed (interactive)
 
-## Safety rules — read these before acting
+The cron handles everything *mechanical*. Claude Code is for the parts that benefit from judgment:
 
-1. **Always run `caps` before a batch action.** If a cap is at or near the limit, stop.
-2. **Never bypass the CLI.** Don't call adapter methods directly — they don't enforce rate limits.
-3. **Dry-run first when unsure.** Set `DRY_RUN=1` in `.env` for a session if you're testing.
-4. **Stop immediately if anything looks off** — captcha screenshots, "unusual activity" messages, blank search results from Playwright. Tell the user and wait.
-5. **Don't add new prospects faster than you can work them.** Search ≤ 20/day; the funnel narrows.
+1. **Writing a campaign brief.** The user iterates with you on `campaigns/<slug>.md`. Help them name pain points specifically (not generically), pick proof points that match the ICP, and set tone.
+2. **Replying to an interested prospect.** When a reply lands, the user often pastes the inbound text into Claude Code and asks for a thoughtful response. Read the prior thread (in `messages` table) for context.
+3. **Tuning the drafter prompt.** If drafts feel off, iterate on `.claude/agents/message-drafter.md`. Edit and immediately rerun `linkedin daily` to see the new style.
+4. **One-off prospect work.** "Draft a custom DM2 for prospect 5 — they replied with a question about pricing." Use the message-drafter subagent directly.
 
-## Headless mode (scheduled runs)
+## CLI reference
 
-`scripts/daily_outreach.sh` is the cron entry point. It invokes Claude Code headless with a fixed prompt that runs through the standard playbook above. The agent (you) operates with no human in the loop for those runs — be extra conservative.
+All commands are `python -m linkedin_agent <subcommand>` (or `linkedin <subcommand>` if the venv is activated).
+
+### Day-to-day
+| Command | Purpose |
+|---|---|
+| `status` | One-shot dashboard: caps, window status, pipeline by stage, replies, due follow-ups |
+| `daily` | Run the full cron cycle once |
+| `caps` | Usage vs. daily caps |
+| `poll` | Fetch inbound replies only |
+| `pipeline [--status STATUS]` | List prospects |
+
+### Campaigns
+| Command | Purpose |
+|---|---|
+| `campaign create <slug>` | Scaffold a new campaign markdown file + DB row |
+| `campaign sync` | Re-read all `campaigns/*.md` into the DB |
+| `campaign list` | All campaigns |
+| `campaign show <slug>` | Print the full brief |
+| `campaign archive <slug>` | Mark archived (no new work) |
+| `campaign assign <prospect_id> <slug>` | Attach a prospect to a campaign |
+
+### Discovery + manual outreach
+| Command | Purpose |
+|---|---|
+| `search "<query>" --campaign <slug> --limit N` | Search LinkedIn, import N prospects into the campaign |
+| `posts <prospect_id>` | Recent posts |
+| `react <prospect_id>` | React manually |
+| `connect <prospect_id> --note "..."` | Send connection request manually |
+| `dm <prospect_id> "<body>"` | Send DM manually |
+
+### Telegram + bot daemon
+| Command | Purpose |
+|---|---|
+| `bot-run` | Start the Telegram daemon (long-running; runs alongside cron) |
+| `telegram-test` | Sanity check |
+| `telegram-push-draft <draft_id>` | Manually re-push a draft to Telegram |
+| `_debug-enqueue <pid> <kind> "<body>" [--no-push]` | Enqueue without invoking the drafter (testing) |
+
+### Send-window
+| Command | Purpose |
+|---|---|
+| `send-approved [--force]` | Flush any `approved` drafts that were queued outside the window |
+
+## Safety rules
+
+1. **Never bypass the CLI.** Adapter methods don't enforce rate limits. Always use `python -m linkedin_agent <subcommand>`.
+2. **Always check `caps` or `status` before bulk actions.** Hard caps (default 30 reactions / 20 connections / 10 DMs / 50 searches per 24h) will raise.
+3. **Don't push drafts to LinkedIn that haven't been approved in Telegram.** The approval flow is the human-in-the-loop quality check.
+4. **Stop if anything looks off.** Captcha screens, "unusual activity" warnings, or unexpected 4xx responses from Unipile → tell the user, don't retry.
 
 ## State
 
-- DB: `data/outreach.db` (SQLite). Inspect with `sqlite3 data/outreach.db` if needed.
-- Playwright session: `playwright_state/state.json` (gitignored).
-- Action log: `actions` table, queryable for audit.
+- DB: `data/outreach.db` (SQLite). Inspect with `sqlite3 data/outreach.db`.
+- Campaign briefs: `campaigns/*.md`. Source of truth — DB rows are derived.
+- Telegram session: lives in your phone; chat_id captured at setup.
+- Unipile session: managed by Unipile (cookie-based or browser-based on their side).
+- Action log: `actions` table — every API call, drafter result, status transition.
+
+## Headless mode
+
+`scripts/daily_outreach.sh` is the cron entry: `0 9-16 * * 1-5 .../daily_outreach.sh >> /tmp/log 2>&1`. It calls `linkedin daily` directly — no `claude -p` involved at the cron level. The drafter subagent is the only place Claude Code is invoked, and only during drafting.

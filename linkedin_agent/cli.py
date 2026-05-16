@@ -204,6 +204,97 @@ def pipeline(status: str | None, limit: int) -> None:
 
 
 @cli.command()
+def status() -> None:
+    """One-shot pipeline dashboard — caps, window, pipeline stages,
+    replies needing attention, pending Telegram approvals, due follow-ups."""
+    from datetime import datetime, timedelta, timezone
+    from . import send_window
+    from .followup import is_dm2_due, is_dm3_due
+    cfg = load_config()
+    db.init_db()
+
+    # --- Caps row -----------------------------------------------------------
+    caps_pieces = []
+    for kind, field in (("react", "daily_max_reactions"),
+                         ("connect", "daily_max_connections"),
+                         ("dm", "daily_max_dms")):
+        used = db.count_actions_last_24h(kind)
+        cap = getattr(cfg, field)
+        color = "red" if used >= cap else ("yellow" if used > cap * 0.7 else "green")
+        caps_pieces.append(f"{kind} [{color}]{used}/{cap}[/{color}]")
+    caps_line = " · ".join(caps_pieces)
+
+    # --- Window status ------------------------------------------------------
+    if send_window.is_open():
+        window_line = f"[green]OPEN[/green] (next close: today 5:00 PM)"
+    else:
+        when = send_window.format_next_open()
+        window_line = f"[yellow]CLOSED[/yellow] (next opens {when})"
+
+    # --- Pipeline counts ----------------------------------------------------
+    pipeline_counts = {}
+    for s in db.VALID_STATUSES:
+        with db.connect() as conn:
+            row = conn.execute("SELECT COUNT(*) FROM prospects WHERE status = ?", (s,)).fetchone()
+            pipeline_counts[s] = int(row[0])
+
+    # --- Replies needing attention ------------------------------------------
+    replied = db.list_prospects(status="replied", limit=10)
+
+    # --- Pending Telegram approvals ----------------------------------------
+    pending = db.list_pending_drafts(status="pending")
+    approved_queued = db.list_pending_drafts(status="approved")
+
+    # --- Due follow-ups -----------------------------------------------------
+    now = datetime.now(timezone.utc)
+    due_followups = []
+    for p in db.list_prospects(status="dm_sent", limit=1000):
+        if is_dm3_due(p, now):
+            due_followups.append((p["full_name"], "DM3"))
+        elif is_dm2_due(p, now):
+            due_followups.append((p["full_name"], "DM2"))
+
+    # --- Render -------------------------------------------------------------
+    console.print()
+    console.print(f"  [bold]Caps today[/bold]    {caps_line}")
+    console.print(f"  [bold]Window[/bold]        {window_line}")
+    console.print()
+    t = Table(show_header=True, header_style="bold")
+    t.add_column("Stage")
+    t.add_column("Count", justify="right")
+    for s in db.VALID_STATUSES:
+        count = pipeline_counts[s]
+        if count == 0 and s in ("skipped",):
+            continue
+        marker = "  ⚠" if (s == "replied" and count > 0) else "   "
+        t.add_row(f"{marker} {s}", str(count))
+    console.print(t)
+
+    if replied:
+        console.print()
+        console.print(f"[bold yellow]⚠ {len(replied)} {'reply' if len(replied)==1 else 'replies'} needing attention[/bold yellow]")
+        for r in replied[:5]:
+            who = r["full_name"] or r["linkedin_url"]
+            when = r["last_action_at"] or ""
+            company = f" ({r['company']})" if r['company'] else ""
+            console.print(f"    • {who}{company} — {when[:16]}")
+
+    if pending:
+        console.print()
+        console.print(f"📤 [bold]{len(pending)}[/bold] draft(s) pending approval in Telegram")
+    if approved_queued:
+        console.print(f"⏸️  [bold]{len(approved_queued)}[/bold] approved-but-queued (will send next window)")
+
+    if due_followups:
+        console.print()
+        console.print(f"📅 [bold]{len(due_followups)}[/bold] follow-up(s) due:")
+        for name, kind in due_followups[:5]:
+            console.print(f"    • {name} ({kind})")
+
+    console.print()
+
+
+@cli.command()
 def caps() -> None:
     """Show today's usage against the daily caps."""
     cfg = load_config()
@@ -451,6 +542,100 @@ def poll(limit: int, notify: bool) -> None:
         f"unknown senders skipped: {result.skipped_unknown_sender} · "
         f"notifications: {result.notifications_sent}"
     )
+
+
+@cli.command()
+@click.option("--no-telegram", is_flag=True, help="Skip pushing drafts to Telegram (DB only).")
+def followup(no_telegram: bool) -> None:
+    """Find prospects whose DM2/DM3 follow-up is due, draft, and enqueue.
+    Auto-ghost prospects with no reply after DM3 + 14 days."""
+    from .followup import run_followup_cycle
+    from .drafter import draft as drafter_fn
+    cfg = load_config()
+    db.init_db()
+
+    telegram = None
+    if not no_telegram:
+        try:
+            telegram = TelegramClient(cfg)
+        except TelegramError as e:
+            console.print(f"[yellow]telegram disabled ({e}) — running without notifications[/yellow]")
+
+    try:
+        result = run_followup_cycle(cfg, drafter=drafter_fn, telegram=telegram)
+        console.print(
+            f"[green]✓[/green] followup cycle: "
+            f"DM2 enqueued: [bold]{result.dm2_enqueued}[/bold] · "
+            f"DM3 enqueued: [bold]{result.dm3_enqueued}[/bold] · "
+            f"auto-ghosted: {result.ghosted} · "
+            f"skipped (existing draft): {result.drafts_skipped_existing} · "
+            f"drafter failures: {result.drafts_failed}"
+        )
+    finally:
+        if telegram:
+            telegram.close()
+
+
+@cli.command()
+@click.option("--no-telegram", is_flag=True, help="Skip pushing drafts / summary to Telegram.")
+def daily(no_telegram: bool) -> None:
+    """Run the full daily cycle: sync campaigns, poll inbound, react, draft
+    connections + DMs + follow-ups, flush approved-but-not-sent. Cron entry."""
+    from .daily import run_daily
+    cfg = load_config()
+    telegram = None
+    if not no_telegram:
+        try:
+            telegram = TelegramClient(cfg)
+        except TelegramError as e:
+            console.print(f"[yellow]telegram disabled ({e}) — running quietly[/yellow]")
+    try:
+        result = run_daily(cfg, telegram=telegram, notify_summary=(telegram is not None))
+        console.print(f"[green]✓[/green] daily run complete")
+        console.print(result.summary())
+    finally:
+        if telegram:
+            telegram.close()
+
+
+@cli.command("send-approved")
+@click.option("--force", is_flag=True, help="Send even outside the 9-5 Mon-Fri window.")
+def send_approved(force: bool) -> None:
+    """Flush any pending_drafts in status='approved' through Unipile.
+    Respects the send window unless --force."""
+    from .bot_daemon import send_draft_via_adapter
+    from . import send_window
+    cfg = load_config()
+    db.init_db()
+
+    if not force and not send_window.is_open():
+        when = send_window.format_next_open()
+        console.print(f"[yellow]send window closed — next opens {when}. Use --force to override.[/yellow]")
+        sys.exit(0)
+
+    drafts = db.list_pending_drafts(status="approved")
+    if not drafts:
+        console.print("[dim]no approved drafts waiting[/dim]")
+        return
+
+    adapter = get_adapter(cfg)
+    sent = 0
+    failed = 0
+    try:
+        for d in drafts:
+            try:
+                send_draft_via_adapter(cfg, adapter, d, source="send-approved")
+                console.print(f"  [green]✓[/green] sent draft #{d['id']} ({d['kind']})")
+                sent += 1
+            except safety.RateLimitExceeded as e:
+                console.print(f"  [yellow]⚠[/yellow] draft #{d['id']}: {e}")
+                break
+            except Exception as e:
+                console.print(f"  [red]✗[/red] draft #{d['id']}: {e}")
+                failed += 1
+    finally:
+        adapter.close()
+    console.print(f"[green]✓[/green] flushed {sent} draft(s), {failed} failed")
 
 
 @cli.command("bot-run")

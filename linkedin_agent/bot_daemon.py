@@ -20,7 +20,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-from . import db, safety
+from . import db, safety, send_window
 from .adapters import get_adapter
 from .config import Config, load as load_config
 from .telegram import TelegramClient, TelegramError
@@ -120,6 +120,20 @@ class BotDaemon:
             self.tg.answer_callback(cb_id, f"Unknown action: {action}")
 
     def _approve(self, cb_id: str, draft, message_id: int) -> None:
+        # Outside the send window, queue: flip draft to 'approved' but don't
+        # call the adapter. The daily cron's `send-approved` step flushes
+        # these during the next open window.
+        if not send_window.is_open():
+            db.set_draft_status(draft["id"], "approved")
+            self.tg.answer_callback(cb_id, "Approved — queued for next window")
+            when = send_window.format_next_open()
+            self.tg.edit_message(
+                message_id,
+                f"⏸️ *Approved* — queued for {when}\n\n{draft['body']}",
+                reply_markup={"inline_keyboard": []},
+            )
+            return
+
         self.tg.answer_callback(cb_id, "Sending…")
         try:
             self._send_via_adapter(draft)
@@ -191,32 +205,37 @@ class BotDaemon:
     # -------------------------------------------------------- adapter send
 
     def _send_via_adapter(self, draft) -> None:
-        """Translate a pending_draft into the right adapter call. Updates DB
-        on success. Caller handles exceptions for Telegram feedback."""
-        prospect = db.get_prospect(draft["prospect_id"])
-        if not prospect:
-            raise RuntimeError(f"prospect {draft['prospect_id']} missing")
-        kind = draft["kind"]
-        body = draft["body"]
-        url = prospect["linkedin_url"]
-        pid = prospect["id"]
+        send_draft_via_adapter(self.cfg, self.adapter, draft, source="telegram")
 
-        if kind == "connect_note":
-            safety.check_cap(self.cfg, "connect")
-            result = self.adapter.send_connection(url, note=body)
-            db.set_status(pid, "connection_sent")
-            db.log_action(pid, "connect", json.dumps({"note": body[:200], "via": "telegram"}), result, False)
-        elif kind in ("dm1", "dm2", "dm3"):
-            safety.check_cap(self.cfg, "dm")
-            result = self.adapter.send_dm(url, body)
-            db.set_status(pid, "dm_sent")
-            db.record_message(pid, "outbound", body)
-            db.record_dm(pid)
-            db.log_action(pid, "dm", json.dumps({"kind": kind, "via": "telegram"}), result, False)
-        else:
-            raise RuntimeError(f"unknown draft kind {kind!r}")
 
-        db.set_draft_status(draft["id"], "sent")
+def send_draft_via_adapter(cfg: Config, adapter, draft, *, source: str = "cli") -> None:
+    """Translate a pending_draft into the right adapter call. Updates DB on
+    success. Caller handles exceptions for telemetry/UI feedback. Module-level
+    so both the bot daemon and `send-approved` CLI can call it."""
+    prospect = db.get_prospect(draft["prospect_id"])
+    if not prospect:
+        raise RuntimeError(f"prospect {draft['prospect_id']} missing")
+    kind = draft["kind"]
+    body = draft["body"]
+    url = prospect["linkedin_url"]
+    pid = prospect["id"]
+
+    if kind == "connect_note":
+        safety.check_cap(cfg, "connect")
+        result = adapter.send_connection(url, note=body)
+        db.set_status(pid, "connection_sent")
+        db.log_action(pid, "connect", json.dumps({"note": body[:200], "via": source}), result, False)
+    elif kind in ("dm1", "dm2", "dm3"):
+        safety.check_cap(cfg, "dm")
+        result = adapter.send_dm(url, body)
+        db.set_status(pid, "dm_sent")
+        db.record_message(pid, "outbound", body)
+        db.record_dm(pid)
+        db.log_action(pid, "dm", json.dumps({"kind": kind, "via": source}), result, False)
+    else:
+        raise RuntimeError(f"unknown draft kind {kind!r}")
+
+    db.set_draft_status(draft["id"], "sent")
 
 
 def run() -> None:

@@ -46,21 +46,7 @@ def _run(args: list[str], env: dict[str, str], *, expect_fail: bool = False) -> 
     return result
 
 
-@pytest.fixture
-def env(tmp_path: Path) -> dict[str, str]:
-    """Per-test isolated env: fake backend, temp DB, generous caps, no delays."""
-    db_path = tmp_path / "smoke.db"
-    return {
-        "LINKEDIN_BACKEND": "fake",
-        "LINKEDIN_DB_PATH": str(db_path),
-        "DAILY_MAX_REACTIONS": "30",
-        "DAILY_MAX_CONNECTIONS": "20",
-        "DAILY_MAX_DMS": "10",
-        "DAILY_MAX_SEARCHES": "50",
-        "ACTION_DELAY_MIN": "0",
-        "ACTION_DELAY_MAX": "0",
-        "DRY_RUN": "0",
-    }
+# env fixture lives in tests/conftest.py — shared across test files.
 
 
 def _db_query(db_path: str, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
@@ -241,3 +227,142 @@ def test_full_playbook_walks_pipeline(env: dict[str, str]) -> None:
     )
     by_kind = {r["kind"]: r["c"] for r in counts}
     assert by_kind == {"search": 1, "react": 1, "connect": 1, "dm": 1}
+
+
+# --------------------------------------------------------------------------- campaigns
+
+
+def test_campaign_create_list_show(env: dict[str, str]) -> None:
+    """campaign create scaffolds the markdown file + DB row; list/show display it."""
+    import time
+    _run(["init"], env)
+
+    # campaign create uses the project's campaigns/ directory; the brief is a
+    # side effect on disk. Use a short, unique slug so it fits in Rich's table.
+    slug = f"t{int(time.time()*1000) % 100000}"
+    try:
+        _run(["campaign", "create", slug, "--name", "Test Campaign"], env)
+
+        result = _run(["campaign", "list"], env)
+        # Slug may be truncated in table display — assert on name and full slug
+        # in raw stdout (Rich wraps but doesn't truncate short slugs).
+        assert "Test Campaign" in result.stdout
+        assert slug in result.stdout
+
+        result = _run(["campaign", "show", slug], env)
+        assert "Test Campaign" in result.stdout
+        assert "Pitch" in result.stdout
+    finally:
+        from linkedin_agent import campaigns as campaigns_mod
+        p = campaigns_mod.brief_path_for(slug)
+        if p.exists():
+            p.unlink()
+
+
+def test_campaign_sync_picks_up_status_changes(env: dict[str, str]) -> None:
+    """Editing the markdown frontmatter and running `sync` updates the DB row."""
+    import time
+    _run(["init"], env)
+    slug = f"s{int(time.time()*1000) % 100000}"
+    try:
+        _run(["campaign", "create", slug], env)
+
+        # Manually edit the brief to mark it paused
+        from linkedin_agent import campaigns as campaigns_mod
+        path = campaigns_mod.brief_path_for(slug)
+        content = path.read_text()
+        path.write_text(content.replace("status: active", "status: paused"))
+
+        _run(["campaign", "sync"], env)
+
+        rows = _db_query(env["LINKEDIN_DB_PATH"], "SELECT status FROM campaigns WHERE slug = ?", (slug,))
+        assert rows[0]["status"] == "paused"
+    finally:
+        from linkedin_agent import campaigns as campaigns_mod
+        p = campaigns_mod.brief_path_for(slug)
+        if p.exists():
+            p.unlink()
+
+
+def test_search_with_campaign_attaches_prospects(env: dict[str, str]) -> None:
+    """`search --campaign <slug>` sets campaign_id on imported prospects."""
+    import time
+    _run(["init"], env)
+    slug = f"a{int(time.time()*1000) % 100000}"
+    try:
+        _run(["campaign", "create", slug], env)
+        _run(["search", "test query", "--limit", "2", "--campaign", slug], env)
+        rows = _db_query(
+            env["LINKEDIN_DB_PATH"],
+            "SELECT p.id, p.full_name FROM prospects p JOIN campaigns c ON p.campaign_id = c.id WHERE c.slug = ?",
+            (slug,),
+        )
+        assert len(rows) == 2
+    finally:
+        from linkedin_agent import campaigns as campaigns_mod
+        p = campaigns_mod.brief_path_for(slug)
+        if p.exists():
+            p.unlink()
+
+
+# --------------------------------------------------------------------------- draft state machine
+
+
+def test_debug_enqueue_creates_pending_draft(env: dict[str, str]) -> None:
+    """_debug-enqueue inserts a pending_drafts row without invoking the drafter."""
+    _run(["init"], env)
+    _run(["search", "q", "--limit", "1"], env)
+    _run(["_debug-enqueue", "1", "dm1", "hand-written body", "--no-push"], env)
+
+    rows = _db_query(env["LINKEDIN_DB_PATH"], "SELECT kind, status, body FROM pending_drafts")
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "dm1"
+    assert rows[0]["status"] == "pending"
+    assert rows[0]["body"] == "hand-written body"
+
+
+def test_send_approved_completes_draft_lifecycle(env: dict[str, str]) -> None:
+    """Enqueue → mark approved → send-approved (window forced open) → status='sent'."""
+    env = {**env, "LINKEDIN_FAKE_WINDOW": "open"}
+    _run(["init"], env)
+    _run(["search", "q", "--limit", "1"], env)
+    _run(["_debug-enqueue", "1", "dm1", "test message body", "--no-push"], env)
+
+    # Move draft to approved (the daemon would normally do this on tap)
+    import sqlite3
+    conn = sqlite3.connect(env["LINKEDIN_DB_PATH"])
+    conn.execute("UPDATE pending_drafts SET status='approved' WHERE id=1")
+    conn.commit()
+    conn.close()
+
+    _run(["send-approved"], env)
+
+    rows = _db_query(env["LINKEDIN_DB_PATH"], "SELECT status FROM pending_drafts WHERE id=1")
+    assert rows[0]["status"] == "sent"
+
+    # Prospect should be marked dm_sent now
+    rows = _db_query(env["LINKEDIN_DB_PATH"], "SELECT status, dm_count FROM prospects WHERE id=1")
+    assert rows[0]["status"] == "dm_sent"
+    assert rows[0]["dm_count"] == 1
+
+
+# --------------------------------------------------------------------------- status
+
+
+def test_status_renders_without_error(env: dict[str, str]) -> None:
+    _run(["init"], env)
+    _run(["search", "q", "--limit", "2"], env)
+    result = _run(["status"], env)
+    assert "Caps today" in result.stdout
+    assert "targeted" in result.stdout
+
+
+# --------------------------------------------------------------------------- followup
+
+
+def test_followup_no_candidates_is_a_noop(env: dict[str, str]) -> None:
+    """No prospects in dm_sent → followup runs cleanly, drafts nothing."""
+    _run(["init"], env)
+    result = _run(["followup", "--no-telegram"], env)
+    assert "DM2 enqueued: 0" in result.stdout
+    assert "DM3 enqueued: 0" in result.stdout
