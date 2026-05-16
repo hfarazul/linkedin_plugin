@@ -52,6 +52,39 @@ KIND_MIN_CHARS = {
 # (no retry) because that's the drafter being honestly stuck.
 MAX_DRAFT_ATTEMPTS = 3
 
+# Spam-tell substrings — the openers spam-detection (human and algorithmic)
+# keys on. The subagent prompt forbids these but the model occasionally
+# generates them anyway under pressure. Catching them post-hoc gives us a
+# belt to the prompt's suspenders.
+#
+# Matched case-insensitively against the full draft body. Whole-phrase
+# matching only (no partial substrings inside larger words).
+SPAM_TELLS = (
+    "i came across your profile",
+    "i came across your",
+    "i noticed you",
+    "i saw your profile",
+    "i'd love to connect",
+    "i'd love to chat",
+    "i would love to connect",
+    "i would love to chat",
+    "hope you're doing well",
+    "hope this finds you well",
+    "your impressive work",
+    "your impressive background",
+    "open to a quick call",
+    "open to a quick chat",
+)
+
+
+def _contains_spam_tell(body: str) -> str | None:
+    """Return the matched spam-tell phrase, or None if clean."""
+    low = body.lower()
+    for phrase in SPAM_TELLS:
+        if phrase in low:
+            return phrase
+    return None
+
 
 @dataclass
 class DrafterInput:
@@ -253,6 +286,22 @@ def draft(
                 f"is below the {cap_min}-char minimum for a substantive "
                 f"`{kind}`. Add a specific reference from the prospect's post "
                 f"or profile and a real question. Do not return a single line."
+            )
+            continue
+
+        # Spam-tell scan: even with the prompt rule, the model occasionally
+        # produces banal openers like "I came across your profile". Reject +
+        # retry with a specific call-out.
+        spam = _contains_spam_tell(body)
+        if spam:
+            last_failure = f"spam tell {spam!r} (attempt {attempt})"
+            last_body_preview = body
+            retry_hint = (
+                f"Your previous attempt contained the spam-tell phrase "
+                f"{spam!r}. This is in the hard-rules list. Rewrite without "
+                f"any variant of: 'I came across', 'I noticed you', 'I saw "
+                f"your profile', 'I'd love to chat/connect', 'hope you're "
+                f"doing well'. Start with a specific reference instead."
             )
             continue
 

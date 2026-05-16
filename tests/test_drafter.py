@@ -275,3 +275,72 @@ def test_draft_first_attempt_clean_does_not_retry(monkeypatch, db_env):
     result = drafter.draft("connect_note", pid)
     assert result == clean
     assert len(stub.calls) == 1
+
+
+# ===== spam-tell post-validation ============================================
+
+@pytest.mark.unit
+@pytest.mark.parametrize("spam_text,expected_phrase", [
+    ("I came across your profile and your work is impressive. Curious to learn more about your team.",
+     "i came across your profile"),
+    ("Hi! I noticed you posted about scaling last week. Curious to hear more.",
+     "i noticed you"),
+    ("Your impressive work in the space caught my eye. I run an AI studio.",
+     "your impressive work"),
+    ("I'd love to chat about how we can help you grow Cortivo's revenue this quarter.",
+     "i'd love to chat"),
+    ("Hope you're doing well! Wanted to share what we've been building lately.",
+     "hope you're doing well"),
+])
+def test_contains_spam_tell_detects_known_phrases(spam_text, expected_phrase):
+    assert drafter._contains_spam_tell(spam_text) == expected_phrase
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("clean_text", [
+    # Real verified-good drafts we've previewed during testing
+    "Stefan — the '90% fail, 100% mature' post stuck with me. Curious what Catalogue is building post-raise, and how you're thinking about engineering velocity before a full hire.",
+    "Bay Area for the next few weeks — worth a quick hello if you've got time. I run a small AI-eng studio (ex-Mastercard PM, 5 yrs shipping prod AI). Curious what you're building post-Waymo.",
+    "Your post on rails migrations hit a nerve. We just shipped one like that. Curious how you're approaching it?",
+])
+def test_contains_spam_tell_false_positives(clean_text):
+    """Real good-quality drafts must NOT trigger the spam-tell filter."""
+    assert drafter._contains_spam_tell(clean_text) is None
+
+
+@pytest.mark.unit
+def test_draft_retries_on_spam_tell(monkeypatch, db_env):
+    """Drafter detects a spam-tell in output and retries with a targeted hint."""
+    from linkedin_agent import db
+    pid = db.upsert_prospect("https://www.linkedin.com/in/test", full_name="Test User")
+
+    spam = ("I came across your profile and noticed your impressive work. " +
+            "Would love to connect and learn more about your space. " * 3)
+    clean = "Your recent post on engineering velocity stood out. " + "X" * 150
+    stub = _StubInvoker([spam, clean])
+    monkeypatch.setattr(drafter, "_invoke_claude", stub)
+
+    result = drafter.draft("connect_note", pid)
+    assert result == clean
+    assert len(stub.calls) == 2
+    # Retry prompt should mention the spam-tell phrases
+    assert "spam-tell" in stub.calls[1].lower() or "i came across" in stub.calls[1].lower()
+
+
+@pytest.mark.unit
+def test_draft_gives_up_after_3_spam_attempts(monkeypatch, db_env):
+    """If all 3 retries produce spam tells, give up cleanly."""
+    from linkedin_agent import db
+    pid = db.upsert_prospect("https://www.linkedin.com/in/test", full_name="Test User")
+
+    # Build 3 different spam-tell strings (each long enough to pass length)
+    spam_a = "I came across your profile and " + "X" * 200
+    spam_b = "I noticed you wrote about AI lately. " + "X" * 200
+    spam_c = "Hope you're doing well! Curious to chat. " + "X" * 200
+
+    stub = _StubInvoker([spam_a, spam_b, spam_c])
+    monkeypatch.setattr(drafter, "_invoke_claude", stub)
+
+    with pytest.raises(drafter.DrafterError, match="all 3 drafter attempts failed"):
+        drafter.draft("connect_note", pid)
+    assert len(stub.calls) == 3

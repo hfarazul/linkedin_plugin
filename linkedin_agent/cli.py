@@ -630,6 +630,61 @@ def daily(no_telegram: bool) -> None:
             telegram.close()
 
 
+@cli.command()
+@click.option("--max-age-minutes", default=90, type=int,
+              help="Alert if no daily_completed action in this window. Default 90 (cron is hourly, plus buffer).")
+@click.option("--quiet", is_flag=True, help="Don't post a Telegram alert on failure (just exit code).")
+def healthcheck(max_age_minutes: int, quiet: bool) -> None:
+    """Verify the cron-driven daily run actually fired recently.
+
+    Exits 0 if a daily_completed action was logged within the last
+    --max-age-minutes during business hours; exits 1 + posts a Telegram
+    alert otherwise. Intended to run via cron at end of business day so
+    silent cron failures don't go unnoticed.
+
+    Outside business hours (weekend, before 9am, after 5pm) this is a no-op."""
+    from datetime import datetime
+    from . import send_window
+    cfg = load_config()
+    db.init_db()
+
+    # Only check during business hours — weekend/evening false positives
+    # would be more noise than signal.
+    if not send_window.is_open():
+        console.print("[dim]send window closed — healthcheck skipped[/dim]")
+        sys.exit(0)
+
+    with db.connect() as conn:
+        row = conn.execute(
+            f"""SELECT created_at FROM actions
+                WHERE kind = 'daily_completed'
+                  AND created_at >= datetime('now', '-{max_age_minutes} minutes')
+                ORDER BY created_at DESC LIMIT 1"""
+        ).fetchone()
+
+    if row:
+        console.print(f"[green]✓[/green] last daily run at {row['created_at']}")
+        sys.exit(0)
+
+    msg = (
+        f"⚠️ healthcheck failed — no daily_completed in the last "
+        f"{max_age_minutes} minutes during business hours. Check cron + logs."
+    )
+    console.print(f"[red]{msg}[/red]")
+
+    if not quiet:
+        try:
+            tg = TelegramClient(cfg)
+            try:
+                tg.notify_text(msg)
+            finally:
+                tg.close()
+            console.print("[dim](posted alert to Telegram)[/dim]")
+        except TelegramError as e:
+            console.print(f"[dim](could not post Telegram alert: {e})[/dim]")
+    sys.exit(1)
+
+
 @cli.command("send-approved")
 @click.option("--force", is_flag=True, help="Send even outside the 9-5 Mon-Fri window.")
 def send_approved(force: bool) -> None:

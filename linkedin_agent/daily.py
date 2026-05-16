@@ -229,6 +229,25 @@ def run_daily(
             except Exception as e:
                 logger.warning("summary push failed: %s", e)
 
+        # Log an explicit "daily_completed" action so the healthcheck can
+        # verify the cron actually fired. prospect_id=NULL (it's a system-level
+        # action). dry_run=False even in DRY_RUN mode — the daily itself ran.
+        db.log_action(
+            None, "daily_completed",
+            json.dumps({
+                "reactions": result.reactions_sent,
+                "connect_drafts": result.connect_drafts,
+                "dm1_drafts": result.dm1_drafts,
+                "dm2_drafts": result.dm2_drafts,
+                "dm3_drafts": result.dm3_drafts,
+                "ghosted": result.ghosted,
+                "approved_sent": result.approved_sent,
+                "errors": len(result.errors),
+            }),
+            "ok",
+            False,
+        )
+
     finally:
         if own_adapter:
             adapter.close()
