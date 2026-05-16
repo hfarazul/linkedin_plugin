@@ -7,7 +7,9 @@ target_icp: Non-technical founders in YC, Techstars, On Deck, StartX, Antler, or
 
 # Pitch
 
-Cortivo is a small AI-engineering studio led by Haque Farazul (ex-Mastercard PM, IIT Kharagpur top 0.5% of batch, 5+ years shipping production AI). We pair one senior engineer with AI tooling so a non-technical founder gets the velocity of a 3-4 person engineering team for the cost of one. Typical engagement: 6-10 weeks from kickoff to users.
+Cortivo is a small AI-engineering studio. Founders: Haque Farazul (ex-Mastercard PM, IIT Kharagpur top 0.5%) and Ritik Kansal (ex-Amazon SDE, ex-Oracle). Team includes engineers from the IITs.
+
+We pair one senior engineer with AI tooling so a non-technical founder gets the velocity of a 3-4 person engineering team for the cost of one. Typical engagement: 6-10 weeks from kickoff to users.
 
 Built for the post-Demo-Day moment: you've got runway and a thesis; you need shipped code more than headcount.
 
@@ -20,9 +22,10 @@ Built for the post-Demo-Day moment: you've got runway and a thesis; you need shi
 
 # Proof points (use whichever fits the prospect)
 
-- **Microforge** — agentic platform we built that surfaces early-stage open source projects for VCs; currently used by a16z, Sequoia, Elevation Capital, and Accel (relevant for accelerator founders who'll eventually raise from these firms)
-- **Experial** (GenAI engineer) — built the survey-generation agent (Agno + 20+ tools) plus the survey-answering agents powering a platform now piloted by Coca-Cola and Bosch
-- **Bespoke** (GenAI engineer) — built the AI copilot for wealth managers: agents, memory, RAG, and the backend that connects everything
+- **Microforge** — agentic platform we built; used by a16z, Sequoia, Elevation Capital, and Accel (highly relevant — these are likely the same firms your prospect will raise from)
+- **Experial** (Haque, GenAI engineer) — built the survey-generation agent (Agno + 20+ tools) plus the survey-answering agents powering a platform now piloted by Coca-Cola and Bosch
+- **Bespoke** (Haque, GenAI engineer) — built the AI copilot for wealth managers: agents, memory, RAG, and the backend that connects everything
+- **Amazon** — Ritik built ML-based inventory routing for 1-day delivery + microservices on AWS CDK (signals we can ship at scale)
 - **AI Website Generator** — reduced campaign-site creation from days to under 2 minutes
 - **Truthseeker** — decentralized agentic oracle with 95% accuracy
 

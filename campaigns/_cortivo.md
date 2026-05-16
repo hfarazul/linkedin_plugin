@@ -4,13 +4,17 @@ name: Cortivo positioning (shared by all campaigns)
 status: reference
 ---
 
-# Founder + team
+# Founders + team
 
-Haque Farazul — Co-Founder, Cortivo AI. IIT Kharagpur (top 0.5% of batch, Institute Order of Merit, micro-spec in Entrepreneurship & Innovation). Ex-Mastercard (Product), ex-Push Protocol (Product). 5+ years shipping production AI. Previously Co-Founder at Rize Labs. Led teams of 10+ engineers.
+Haque Farazul — Co-Founder. IIT Kharagpur (top 0.5% of batch, Institute Order of Merit, micro-spec in Entrepreneurship & Innovation). Ex-Mastercard (Product), ex-Push Protocol (Product). 5+ years shipping production AI. Previously Co-Founder at Rize Labs.
+
+Ritik Kansal — Co-Founder. Ex-Amazon SDE, ex-Oracle Software Engineering Intern. Runs Coding Sphere (https://codingsphere.co) — Top Rated Plus on Upwork with 100% job success. Officially Top 3% on Toptal. Currently runs the entire tech department for Landmark Educational Tours (custom web apps in production).
+
+Team: engineers from the IITs (Indian Institute of Technology).
 
 # What Cortivo is
 
-A small AI-engineering studio. We pair a senior engineer (Haque or a hand-picked partner) with AI tooling so a non-technical founder gets the equivalent of a 3-4 person eng team for one engineer's cost. Typical engagement: 6-10 weeks from kickoff to live users.
+A small AI-engineering studio. We pair a senior engineer (Haque, Ritik, or a hand-picked IIT partner) with AI tooling so a non-technical founder gets the equivalent of a 3-4 person eng team for one engineer's cost. Typical engagement: 6-10 weeks from kickoff to live users.
 
 We're built for the moment after you've validated the idea and before you can justify hiring full-time engineers. Founders stay product owners; we ship.
 
@@ -18,10 +22,13 @@ We're built for the moment after you've validated the idea and before you can ju
 
 ## A-tier — enterprise + VC name recognition
 
-- **Experial** (GenAI engineer) — built the survey-generation agent (Agno + 20+ tools), survey-answering agents with advanced context management, plus the backend and infra. **Experial is being piloted by Coca-Cola and Bosch.**
-- **Bespoke** (GenAI engineer) — built the AI copilot for wealth managers: agents, memory, RAG, and the backend that ties it together. Also built the early-signal-detection system that connects market data to actionable insights.
+- **Experial** (Haque, GenAI engineer) — built the survey-generation agent (Agno + 20+ tools), survey-answering agents with advanced context management, plus the backend and infra. **Experial is being piloted by Coca-Cola and Bosch.**
+- **Bespoke** (Haque, GenAI engineer) — built the AI copilot for wealth managers: agents, memory, RAG, and the backend that ties it together. Also built the early-signal-detection system that connects market data to actionable insights.
 - **Microforge** — agentic platform that surfaces high-potential open source projects for VCs before they become startups. **Used by a16z, Sequoia, Elevation Capital, and Accel.**
-- **Mastercard** — 1.5 years as Product Manager (employment proof, not client).
+- **Amazon** — Ritik was SDE; worked on enabling 1-day deliveries via ML-based inventory routing, microservices, AWS CDK infra.
+- **Mastercard** — Haque was Product Manager for 1.5 years.
+- **Coding Sphere on Upwork** — Top Rated Plus, 100% job success score (Ritik's agency, validated freelance/agency track record).
+- **Toptal Top 3%** — Ritik officially in the top 3% of freelancers worldwide.
 
 ## B-tier — concrete speed/quality wins
 

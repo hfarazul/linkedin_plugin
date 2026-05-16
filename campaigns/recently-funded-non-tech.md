@@ -7,7 +7,9 @@ target_icp: Non-technical founders who closed a pre-seed or seed round in the la
 
 # Pitch
 
-Cortivo is a small AI-engineering studio led by Haque Farazul (ex-Mastercard PM, IIT Kharagpur top 0.5% of batch, 5+ years shipping production AI). We pair one senior engineer with AI tooling so you get the velocity of a 3-4 person team for one engineer's cost. Typical engagement: 6-10 weeks from kickoff to live users.
+Cortivo is a small AI-engineering studio. Founders: Haque Farazul (ex-Mastercard PM, IIT Kharagpur top 0.5%) and Ritik Kansal (ex-Amazon SDE, ex-Oracle). Team includes engineers from the IITs.
+
+We pair one senior engineer with AI tooling so you get the velocity of a 3-4 person team for one engineer's cost. Typical engagement: 6-10 weeks from kickoff to live users.
 
 For a freshly-funded non-tech founder, the math is: spend the next quarter hiring (and probably failing) vs. spend the next quarter shipping. We're built for the second option.
 
@@ -21,11 +23,12 @@ For a freshly-funded non-tech founder, the math is: spend the next quarter hirin
 
 # Proof points (use whichever fits the prospect)
 
-- **Experial** (GenAI engineer) — built the survey-generation agent (Agno + 20+ tools) and survey-answering agents powering a platform now piloted by Coca-Cola and Bosch
-- **Bespoke** (GenAI engineer) — built the AI copilot for wealth managers: agents, memory, RAG, and the early-signal-detection system tying market data to actionable insights
+- **Experial** (Haque, GenAI engineer) — built the survey-generation agent (Agno + 20+ tools) and survey-answering agents powering a platform now piloted by Coca-Cola and Bosch
+- **Bespoke** (Haque, GenAI engineer) — built the AI copilot for wealth managers: agents, memory, RAG, and the early-signal-detection system tying market data to actionable insights
 - **Microforge** — agentic platform we built; used by a16z, Sequoia, Elevation, and Accel to find open source projects before they become startups
-- **AI Marketing Tools** — banner and meme generation, asset creation reduced from days to under 1 minute
+- **Amazon** — Ritik built ML-based inventory routing for 1-day delivery + microservices on AWS CDK (matters for funded founders thinking about scale)
 - **Mastercard** — Haque was Product Manager for 1.5 years; speaks the fintech / enterprise dialect
+- **AI Marketing Tools** — banner and meme generation, asset creation reduced from days to under 1 minute
 
 # Anti-claims — DO NOT say
 
