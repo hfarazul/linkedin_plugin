@@ -120,12 +120,16 @@ def test_draft_returns_cleaned_body_on_success(monkeypatch, db_env):
     from linkedin_agent import db
     pid = db.upsert_prospect("https://www.linkedin.com/in/test", full_name="Test User")
 
-    # ~250 chars: well within dm1 caps (200 min, 600 max)
+    # ~430 chars: above the new 350-char dm1 min (post-DM1-beef-up), well
+    # under the 600 cap. Mirrors the new required structure: hook +
+    # positioning + optional tie-in + CTA.
     body = (
-        "hey there, quick question for you — your recent post about "
-        "shipping faster than the market hit a nerve. Curious if "
-        "you've tried pairing senior engineering with AI tooling on "
-        "your v1, or if you're still riding the in-house hiring path."
+        "Your recent post on shipping faster than the market hit a nerve. "
+        "I'm at Cortivo — small AI-engineering studio with my co-founder Ritik "
+        "(ex-Amazon SDE) and engineers from the IITs. We pair one senior eng "
+        "with AI tooling so non-tech founders ship v1 in 6-10 weeks instead of "
+        "hiring a team. Curious if you've tried that model, or if you're still "
+        "riding the in-house hiring path?"
     )
     monkeypatch.setattr(
         drafter,

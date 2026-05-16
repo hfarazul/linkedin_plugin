@@ -68,10 +68,73 @@ You as the agency owner only see Telegram approval cards on your phone. Tap to a
 
 The cron handles everything *mechanical*. Claude Code is for the parts that benefit from judgment:
 
-1. **Writing a campaign brief.** The user iterates with you on `campaigns/<slug>.md`. Help them name pain points specifically (not generically), pick proof points that match the ICP, and set tone.
+1. **Creating a new campaign** — follow the protocol in the next section. Don't just `campaign create` and let the user write a brief in the dark.
 2. **Replying to an interested prospect.** When a reply lands, the user often pastes the inbound text into Claude Code and asks for a thoughtful response. Read the prior thread (in `messages` table) for context.
 3. **Tuning the drafter prompt.** If drafts feel off, iterate on `.claude/agents/message-drafter.md`. Edit and immediately rerun `linkedin daily` to see the new style.
 4. **One-off prospect work.** "Draft a custom DM2 for prospect 5 — they replied with a question about pricing." Use the message-drafter subagent directly.
+
+## Campaign creation protocol — follow this every time
+
+When the user says "let's create a new campaign" / "I want to target X" / similar:
+
+### Phase 1 — Clarifying questions (don't skip, ask all 8)
+
+Don't accept a one-line ICP. Push for specificity on each:
+
+1. **Who, specifically?** Role + company stage + size. ("Founders" is too broad; "non-tech founders of pre-seed B2B SaaS, under $1M ARR" is workable.)
+2. **Where?** Country/region/cities. (Default to US/Europe unless told otherwise — see Unipile proxy notes in the doc.)
+3. **What pain?** 2-3 specific points the prospect would recognize.
+4. **Why now?** What trigger/timing makes them open to outreach this quarter?
+5. **What Cortivo angle?** Mutual connections? Shared school (IIT)? Specific vertical we've shipped in (fintech via Mastercard/Bespoke, retail via Coca-Cola, etc.)?
+6. **Anti-claims?** What this campaign explicitly avoids saying. (E.g., "don't pitch as cheap" / "don't reference Upwork to VC-track founders.")
+7. **Tone?** Financial/operational? Peer-to-peer? Consultative? Technical?
+8. **Search queries?** What 2-3 LinkedIn classic-search keyword strings would surface this ICP? Remember classic search only does keyword matching — phrases like "we just raised" return investors talking about deals.
+
+### Phase 2 — Search validation (mandatory gate)
+
+For each candidate query (≥1, ideally 2-3):
+
+```
+linkedin validate-query "<query>" --limit 10 --campaign <slug-once-created>
+```
+
+This grades each result on geography + role keywords + noise exclusion. The CLI exits 0 if keepers ≥ 6/10, exits 1 with the table of issues otherwise.
+
+- **All queries pass**: proceed to Phase 3.
+- **All queries fail**: iterate on the search terms with the user. Common fixes — add a specific city ("non-technical founder Boston"), add a stage qualifier ("seed-stage founder"), drop a phrase that matches investor vocabulary.
+- **Mixed**: use only the queries that pass.
+
+### Phase 3 — Generate the brief
+
+Once at least one query passes validation, write `campaigns/<slug>.md` synthesizing the answers from Phase 1. Use the structure in `campaigns/_cortivo.md` as the canon. Per-campaign frontmatter overrides are optional:
+
+```yaml
+---
+slug: ...
+name: ...
+status: active
+target_icp: <long descriptive sentence>
+# Optional ICP heuristic overrides for validate-query:
+icp_role_required: "founder|ceo|owner"
+icp_role_excluded: "investor|vc|venture|coach"
+icp_geo_required: "United States|, CA\\b|United Kingdom"
+---
+```
+
+Then `linkedin campaign sync` and show the user the rendered brief.
+
+### Phase 4 — First import is small
+
+Don't import 50 prospects at once. **Import 5-10 first**, eyeball them in `linkedin pipeline --status targeted`, and only scale up after a couple have moved through to `connected`. This catches campaign mismatches early.
+
+### What to push back on
+
+If the user gives vague answers, ask follow-ups. Specifically:
+- "Founders" → push for stage + vertical
+- "AI companies" → push for buyer profile (founder? CTO? Head of Product?)
+- "Tech founders" → push for non-technical vs technical (huge ICP-fit signal)
+
+A campaign with vague positioning produces drafts that read templated. The whole point of the protocol is to surface specificity that the drafter can latch onto.
 
 ## CLI reference
 

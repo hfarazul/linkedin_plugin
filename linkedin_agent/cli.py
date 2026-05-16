@@ -45,6 +45,73 @@ def auth() -> None:
     PlaywrightAdapter(cfg).login_interactive()
 
 
+@cli.command("validate-query")
+@click.argument("query")
+@click.option("--limit", default=10, type=int, help="Sample size.")
+@click.option("--campaign", default=None, help="If set, use the campaign's ICP overrides for grading.")
+@click.option("--threshold", default=6, type=int, help="Keepers required for the query to pass.")
+def validate_query(query: str, limit: int, campaign: str | None, threshold: int) -> None:
+    """Trial-run a search query and grade each result against ICP heuristics
+    (location match, role keywords, noise exclusion). Does NOT import to DB —
+    purely a quality check.
+
+    Use this BEFORE `linkedin search --campaign` to avoid burning prospects
+    on a noisy query. Search returning Indian VCs when you wanted US founders?
+    Catch it here, not after a campaign of bad outreach."""
+    from . import campaigns as campaigns_mod
+    from .icp_scoring import CampaignICP, validate_results
+    cfg, adapter = _adapter()
+    icp = CampaignICP()
+    icp_label = "defaults"
+    if campaign:
+        try:
+            brief = campaigns_mod.load_brief(campaign)
+            # Re-parse frontmatter to access raw override fields
+            raw = brief.path.read_text()
+            meta, _ = campaigns_mod._parse_frontmatter(raw)
+            icp = CampaignICP.from_brief_meta(meta)
+            icp_label = f"campaign {campaign!r} overrides"
+        except FileNotFoundError:
+            console.print(f"[red]no campaign {campaign!r}[/red]")
+            sys.exit(1)
+
+    try:
+        hits = adapter.search(query, limit=limit)
+    finally:
+        adapter.close()
+
+    if not hits:
+        console.print(f"[yellow]query {query!r} returned 0 results[/yellow]")
+        sys.exit(1)
+
+    result = validate_results(hits, icp=icp, threshold=threshold)
+    console.print(f"[bold]Validation: {query!r}[/bold] · ICP: {icp_label}\n")
+
+    t = Table(show_header=True)
+    for col in ("status", "name", "location", "headline", "issues"):
+        t.add_column(col)
+    for g in result.grades:
+        marker = "[green]✓[/green]" if g.is_keeper else "[red]✗[/red]"
+        t.add_row(
+            marker,
+            (g.prospect.full_name or "—")[:30],
+            (g.prospect.location or "—")[:25],
+            (g.prospect.headline or "—")[:50],
+            "; ".join(g.notes)[:50],
+        )
+    console.print(t)
+    console.print()
+
+    pass_fail = "[green]PASS[/green]" if result.passes else "[red]FAIL[/red]"
+    console.print(
+        f"{pass_fail}  Keepers: [bold]{result.keeper_count}/{result.total}[/bold]"
+        f" · Threshold: {result.threshold}/10"
+    )
+    if not result.passes:
+        console.print("[yellow]Refine the query before running `linkedin search --campaign`.[/yellow]")
+        sys.exit(1)
+
+
 @cli.command()
 @click.argument("query")
 @click.option("--limit", default=10, help="Max prospects to import.")

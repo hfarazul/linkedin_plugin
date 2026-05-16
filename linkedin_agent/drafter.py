@@ -42,7 +42,7 @@ KIND_MAX_CHARS = {
 # for a connect_note that should be ~200). Triggers a retry.
 KIND_MIN_CHARS = {
     "connect_note": 100,
-    "dm1": 200,
+    "dm1": 350,        # was 200 — DM1 now requires hook + positioning + (opt proof) + CTA
     "dm2": 120,
     "dm3": 50,
 }
