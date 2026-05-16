@@ -101,6 +101,32 @@ def test_daily_reacts_to_targeted_prospects(db_env, fake_telegram, monkeypatch):
 
 
 @pytest.mark.integration
+def test_daily_passes_recent_posts_to_drafter(db_env, fake_telegram):
+    """daily must fetch the prospect's recent posts and feed them to the drafter,
+    or the drafter has nothing specific to reference and returns INSUFFICIENT_CONTEXT."""
+    from linkedin_agent import db
+    from linkedin_agent.adapters import get_adapter
+    pid = _seed_prospect("reacted")
+    cfg = _make_cfg()
+
+    captured = []
+    def asserting_drafter(kind, prospect_id, recent_posts=None):
+        captured.append({"kind": kind, "prospect_id": prospect_id, "posts": recent_posts})
+        return f"stub-{kind}"
+
+    adapter = get_adapter(cfg)
+    try:
+        daily_mod.run_daily(cfg, adapter=adapter, telegram=fake_telegram, drafter=asserting_drafter)
+    finally:
+        adapter.close()
+
+    # Find the connect_note draft call and verify posts came along
+    connect_calls = [c for c in captured if c["kind"] == "connect_note"]
+    assert len(connect_calls) == 1
+    assert connect_calls[0]["posts"], "drafter called without recent_posts — daily.py regression"
+
+
+@pytest.mark.integration
 def test_daily_drafts_connect_for_reacted(db_env, fake_telegram):
     """reacted prospects get a connect_note draft → enqueued, pushed to fake Telegram."""
     from linkedin_agent import db
@@ -142,7 +168,7 @@ def test_daily_drafts_dm1_for_connected(db_env, fake_telegram):
 
 
 @pytest.mark.integration
-def test_daily_respects_react_cap(db_env, fake_telegram):
+def test_daily_respects_react_cap(db_env, fake_telegram, monkeypatch):
     """With react cap=1, only 1 of 3 targeted prospects gets reacted."""
     from linkedin_agent import db
     from linkedin_agent.adapters import get_adapter
@@ -151,6 +177,7 @@ def test_daily_respects_react_cap(db_env, fake_telegram):
     _seed_prospect("targeted", linkedin_url="https://www.linkedin.com/in/test-b")
     _seed_prospect("targeted", linkedin_url="https://www.linkedin.com/in/test-c")
 
+    monkeypatch.setenv("LINKEDIN_FAKE_WINDOW", "open")
     cfg = _make_cfg(daily_max_reactions=1)
     adapter = get_adapter(cfg)
     try:
@@ -187,7 +214,32 @@ def test_daily_idempotent_within_caps(db_env, fake_telegram):
 
 
 @pytest.mark.integration
-def test_daily_full_chain(db_env, fake_telegram):
+def test_daily_skips_reactions_when_window_closed(db_env, fake_telegram, monkeypatch):
+    """When the send window is closed, the react step skips entirely and
+    targeted prospects stay 'targeted'."""
+    from linkedin_agent import db
+    from linkedin_agent.adapters import get_adapter
+
+    pid = _seed_prospect("targeted", linkedin_url="https://www.linkedin.com/in/test-windowed")
+    monkeypatch.setenv("LINKEDIN_FAKE_WINDOW", "closed")
+    cfg = _make_cfg()
+
+    adapter = get_adapter(cfg)
+    try:
+        result = daily_mod.run_daily(
+            cfg, adapter=adapter, telegram=fake_telegram, drafter=_stub_drafter,
+        )
+    finally:
+        adapter.close()
+
+    assert result.reactions_sent == 0
+    assert "react" in result.skipped_window_steps
+    refreshed = db.get_prospect(pid)
+    assert refreshed["status"] == "targeted"   # untouched
+
+
+@pytest.mark.integration
+def test_daily_full_chain(db_env, fake_telegram, monkeypatch):
     """Mixed-stage DB: every step does its job, no cross-contamination."""
     from linkedin_agent import db
     from linkedin_agent.adapters import get_adapter
@@ -201,6 +253,7 @@ def test_daily_full_chain(db_env, fake_telegram):
     _seed_prospect("dm_sent",   linkedin_url="https://www.linkedin.com/in/p4",
                    dm_count=1, last_dm_at=five_days_ago)
 
+    monkeypatch.setenv("LINKEDIN_FAKE_WINDOW", "open")
     cfg = _make_cfg()
     adapter = get_adapter(cfg)
     try:

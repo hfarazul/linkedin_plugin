@@ -40,6 +40,7 @@ class DailyResult:
     ghosted: int = 0
     approved_sent: int = 0
     skipped_cap_hit: list[str] = field(default_factory=list)
+    skipped_window_steps: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -51,6 +52,8 @@ class DailyResult:
             f"👻 auto-ghosted: {self.ghosted}",
             f"📤 sent from approved-queue: {self.approved_sent}",
         ]
+        if self.skipped_window_steps:
+            lines.append(f"⏸️  window closed — skipped: {', '.join(self.skipped_window_steps)}")
         if self.skipped_cap_hit:
             lines.append(f"⚠️ caps hit: {', '.join(self.skipped_cap_hit)}")
         if self.errors:
@@ -115,27 +118,37 @@ def run_daily(
             result.errors.append(f"poll: {e}")
 
         # --- 3. react to recent posts of targeted prospects --------------------
-        for p in db.list_prospects(status="targeted", limit=10_000):
-            try:
-                safety.check_cap(cfg, "react")
-            except safety.RateLimitExceeded:
-                result.skipped_cap_hit.append("react")
-                break
-            try:
-                posts = adapter.get_recent_posts(p["linkedin_url"], limit=1)
-                if not posts:
-                    continue
-                adapter.react(posts[0], reaction="LIKE")
-                db.set_status(int(p["id"]), "reacted")
-                db.log_action(int(p["id"]), "react",
-                              json.dumps({"post": posts[0].post_id, "via": "daily"}),
-                              posts[0].post_id, False)
-                result.reactions_sent += 1
-            except Exception as e:
-                logger.warning("react failed for prospect %d: %s", p["id"], e)
-                result.errors.append(f"react p={p['id']}: {e}")
+        # Reactions are outbound LinkedIn writes, so they respect the send
+        # window. Drafting still happens outside hours (see steps 4-6) — it's
+        # the API-visible action that gets gated.
+        if not send_window.is_open():
+            logger.info("send window closed — skipping react step")
+            result.skipped_window_steps.append("react")
+        else:
+            for p in db.list_prospects(status="targeted", limit=10_000):
+                try:
+                    safety.check_cap(cfg, "react")
+                except safety.RateLimitExceeded:
+                    result.skipped_cap_hit.append("react")
+                    break
+                try:
+                    posts = adapter.get_recent_posts(p["linkedin_url"], limit=1)
+                    if not posts:
+                        continue
+                    adapter.react(posts[0], reaction="LIKE")
+                    db.set_status(int(p["id"]), "reacted")
+                    db.log_action(int(p["id"]), "react",
+                                  json.dumps({"post": posts[0].post_id, "via": "daily"}),
+                                  posts[0].post_id, False)
+                    result.reactions_sent += 1
+                except Exception as e:
+                    logger.warning("react failed for prospect %d: %s", p["id"], e)
+                    result.errors.append(f"react p={p['id']}: {e}")
 
         # --- 4. connect drafts for reacted prospects ---------------------------
+        # Fetch each prospect's recent posts so the drafter has something
+        # specific to reference. Without posts the drafter returns
+        # INSUFFICIENT_CONTEXT for most profiles.
         for p in db.list_prospects(status="reacted", limit=10_000):
             try:
                 safety.check_cap(cfg, "connect")
@@ -145,7 +158,8 @@ def run_daily(
             if _has_pending_draft(int(p["id"]), "connect_note"):
                 continue
             try:
-                body = drafter("connect_note", int(p["id"]))
+                body = drafter("connect_note", int(p["id"]),
+                               recent_posts=_fetch_posts_for_draft(adapter, p))
             except Exception as e:
                 logger.warning("connect drafter failed for prospect %d: %s", p["id"], e)
                 result.errors.append(f"connect draft p={p['id']}: {e}")
@@ -166,7 +180,8 @@ def run_daily(
             if _has_pending_draft(int(p["id"]), "dm1"):
                 continue
             try:
-                body = drafter("dm1", int(p["id"]))
+                body = drafter("dm1", int(p["id"]),
+                               recent_posts=_fetch_posts_for_draft(adapter, p))
             except Exception as e:
                 logger.warning("dm1 drafter failed for prospect %d: %s", p["id"], e)
                 result.errors.append(f"dm1 draft p={p['id']}: {e}")
@@ -214,6 +229,18 @@ def run_daily(
             telegram.close()
 
     return result
+
+
+def _fetch_posts_for_draft(adapter, prospect, *, limit: int = 3) -> list[dict]:
+    """Best-effort: fetch a prospect's recent posts and return them as the dict
+    list the drafter expects. Returns empty list on any error so the drafter
+    can still try (and may itself bail with INSUFFICIENT_CONTEXT)."""
+    try:
+        posts = adapter.get_recent_posts(prospect["linkedin_url"], limit=limit)
+    except Exception as e:
+        logger.warning("get_recent_posts failed for prospect %d: %s", prospect["id"], e)
+        return []
+    return [{"text": p.text, "posted_at": p.posted_at} for p in posts]
 
 
 def _has_pending_draft(prospect_id: int, kind: str) -> bool:
