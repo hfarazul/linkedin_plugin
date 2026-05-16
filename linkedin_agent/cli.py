@@ -228,8 +228,14 @@ def status() -> None:
     caps_line = " · ".join(caps_pieces)
 
     # --- Window status ------------------------------------------------------
+    # Check is_open FIRST so FAKE_WINDOW=closed (test override) wins over
+    # is_disabled. The combined open + disabled state means 24/7 mode is on
+    # AND nothing's forcing closed; that's when we show "ALWAYS OPEN".
     if send_window.is_open():
-        window_line = f"[green]OPEN[/green] (next close: today 5:00 PM)"
+        if send_window.is_disabled():
+            window_line = "[green]ALWAYS OPEN[/green] (24/7 mode)"
+        else:
+            window_line = "[green]OPEN[/green] (next close: today 5:00 PM)"
     else:
         when = send_window.format_next_open()
         window_line = f"[yellow]CLOSED[/yellow] (next opens {when})"

@@ -17,6 +17,17 @@ import pytest
 from .fakes import FakeTelegramClient
 
 
+# When the project's .env is configured for production (24/7 mode, DRY_RUN
+# off, etc.) those vars leak into the pytest process via python-dotenv's
+# load() call inside linkedin_agent.config. Most tests want to exercise the
+# *default* behavior — so we clear runtime overrides at the start of each
+# test. Tests that need a specific override use monkeypatch.setenv themselves.
+@pytest.fixture(autouse=True)
+def _clear_env_overrides(monkeypatch):
+    for var in ("LINKEDIN_DISABLE_SEND_WINDOW", "LINKEDIN_FAKE_WINDOW"):
+        monkeypatch.delenv(var, raising=False)
+
+
 # ----- env fixture (was in test_smoke.py) -----------------------------------
 
 @pytest.fixture

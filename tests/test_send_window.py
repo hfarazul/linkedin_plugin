@@ -68,6 +68,45 @@ def test_format_next_open_is_human_readable():
         assert "9:00" in s
 
 
+# ===== 24/7 mode (LINKEDIN_DISABLE_SEND_WINDOW) =============================
+
+@pytest.mark.unit
+@pytest.mark.parametrize("value", ["1", "true", "yes", "on", "TRUE", "Yes"])
+def test_is_disabled_recognizes_truthy_values(monkeypatch, value):
+    monkeypatch.setenv("LINKEDIN_DISABLE_SEND_WINDOW", value)
+    assert send_window.is_disabled() is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("value", ["", "0", "false", "no", "off"])
+def test_is_disabled_falsy_or_unset(monkeypatch, value):
+    monkeypatch.setenv("LINKEDIN_DISABLE_SEND_WINDOW", value)
+    assert send_window.is_disabled() is False
+
+
+@pytest.mark.unit
+def test_disabled_window_is_always_open(monkeypatch):
+    """When 24/7 mode is on, is_open returns True even on Saturday at 3 AM."""
+    monkeypatch.setenv("LINKEDIN_DISABLE_SEND_WINDOW", "1")
+    with freeze_time("2026-05-23 03:00:00"):   # Saturday 3am — normally closed
+        assert send_window.is_open() is True
+
+
+@pytest.mark.unit
+def test_fake_window_override_still_wins_over_disable(monkeypatch):
+    """LINKEDIN_FAKE_WINDOW (for tests) must override LINKEDIN_DISABLE_SEND_WINDOW
+    so tests can still force the closed branch even with 24/7 mode set."""
+    monkeypatch.setenv("LINKEDIN_DISABLE_SEND_WINDOW", "1")
+    monkeypatch.setenv("LINKEDIN_FAKE_WINDOW", "closed")
+    assert send_window.is_open() is False
+
+
+@pytest.mark.unit
+def test_format_next_open_says_now_when_disabled(monkeypatch):
+    monkeypatch.setenv("LINKEDIN_DISABLE_SEND_WINDOW", "1")
+    assert send_window.format_next_open() == "now"
+
+
 # ===== integration: send-approved CLI =======================================
 
 import os

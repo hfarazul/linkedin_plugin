@@ -19,17 +19,29 @@ WINDOW_END_HOUR   = 17     # exclusive: 17:00 is closed
 LAST_WEEKDAY      = 4      # Mon=0 ... Fri=4
 
 
+def is_disabled() -> bool:
+    """True if LINKEDIN_DISABLE_SEND_WINDOW is set (24/7 mode).
+    When disabled, the send window is effectively always open."""
+    return os.environ.get("LINKEDIN_DISABLE_SEND_WINDOW", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
 def is_open(now: datetime | None = None) -> bool:
     """True iff `now` (local time) is within the send window.
-    Defaults to datetime.now() if not provided.
 
-    For tests/subprocesses where freezegun doesn't propagate, set
-    LINKEDIN_FAKE_WINDOW=open or =closed to pin the result."""
+    Defaults to datetime.now() if not provided. Resolution order:
+      1. LINKEDIN_FAKE_WINDOW=open|closed (tests / subprocesses where
+         freezegun doesn't propagate)
+      2. LINKEDIN_DISABLE_SEND_WINDOW=1 (production 24/7 opt-out)
+      3. Standard 9-5 Mon-Fri local-time check"""
     override = os.environ.get("LINKEDIN_FAKE_WINDOW", "").strip().lower()
     if override == "open":
         return True
     if override == "closed":
         return False
+    if is_disabled():
+        return True
     if now is None:
         now = datetime.now()
     if now.weekday() > LAST_WEEKDAY:
@@ -60,7 +72,10 @@ def next_open_time(now: datetime | None = None) -> datetime:
 
 
 def format_next_open(now: datetime | None = None) -> str:
-    """User-facing string like 'Mon 9:00 AM' for Telegram messages."""
+    """User-facing string like 'Mon 9:00 AM' for Telegram messages.
+    When the send window is disabled (24/7 mode), returns 'now'."""
+    if is_disabled():
+        return "now"
     when = next_open_time(now)
     # Cross-platform format — %-I works on POSIX, %#I on Windows. Use a manual fallback.
     return when.strftime("%a %-I:%M %p") if hasattr(when, "strftime") else str(when)
