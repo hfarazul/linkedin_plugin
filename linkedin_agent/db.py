@@ -139,6 +139,20 @@ _PROSPECT_COLUMNS = {
     # LinkedIn-internal id (ACo…). Populated from search hits / on-demand
     # resolution so the poll loop can map inbound messages to prospect rows.
     "provider_id":   "TEXT",
+    # ---- enrichment columns (populated by enrichment.enrich()) -------------
+    "public_identifier":         "TEXT",
+    "network_distance":          "TEXT",   # FIRST_DEGREE | SECOND_DEGREE | THIRD_DEGREE | DISTANCE_X
+    "mutual_connections_count":  "INTEGER",
+    "follower_count":            "INTEGER",
+    "connections_count":         "INTEGER",
+    "is_premium":                "INTEGER",  # 0/1
+    "is_open_profile":           "INTEGER",  # 0/1
+    "is_creator":                "INTEGER",  # 0/1
+    "is_influencer":             "INTEGER",  # 0/1
+    "is_relationship":           "INTEGER",  # 0/1 — already connected on LinkedIn
+    "pronoun":                   "TEXT",     # "She/Her", "He/Him", etc.
+    "last_post_at":              "TEXT",     # ISO timestamp of most recent post
+    "enriched_at":               "TEXT",     # when enrichment last ran
 }
 
 _MESSAGE_COLUMNS = {

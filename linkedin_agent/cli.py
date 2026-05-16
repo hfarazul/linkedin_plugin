@@ -527,6 +527,35 @@ def debug_enqueue(prospect_id: int, kind: str, body: str, push: bool) -> None:
 
 
 @cli.command()
+@click.option("--prospect-id", type=int, default=None, help="Enrich just one prospect.")
+@click.option("--all-stale", is_flag=True, help="Enrich all prospects whose enrichment is older than 7 days (or never).")
+@click.option("--limit", default=None, type=int, help="Cap how many to enrich in one run.")
+def enrich(prospect_id, all_stale, limit) -> None:
+    """Fetch full LinkedIn profile + most-recent-post timestamp for prospects
+    and persist the signal (network distance, mutual connections, premium status,
+    follower count, etc.)."""
+    from .enrichment import enrich as enrich_one, enrich_stale
+    cfg = load_config()
+    db.init_db()
+
+    if prospect_id is not None:
+        ok = enrich_one(cfg, prospect_id)
+        console.print(f"[{'green' if ok else 'red'}]{'✓' if ok else '✗'}[/] prospect {prospect_id}")
+        return
+
+    if all_stale:
+        result = enrich_stale(cfg, limit=limit)
+        console.print(
+            f"[green]✓[/green] enriched: [bold]{result.enriched}[/bold] · "
+            f"failed: {result.failed} (e.g. locked profiles) · "
+            f"errors: {len(result.errors)}"
+        )
+        return
+
+    console.print("[yellow]nothing to do — pass --prospect-id <N> or --all-stale[/yellow]")
+
+
+@cli.command()
 @click.option("--limit", default=50, help="Max messages to fetch per poll.")
 @click.option("--notify/--no-notify", default=True, help="Push Telegram notifications for new replies.")
 def poll(limit: int, notify: bool) -> None:
