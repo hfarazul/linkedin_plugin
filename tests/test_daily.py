@@ -124,6 +124,29 @@ def test_daily_passes_recent_posts_to_drafter(db_env, fake_telegram):
 
 
 @pytest.mark.integration
+def test_daily_caches_posts_across_react_and_connect(db_env, fake_telegram):
+    """A prospect that flows targeted → reacted → connect_draft in one cron
+    fire should trigger ONE get_recent_posts call, not two. The react step
+    fetches with limit=3 and caches; the connect step reuses the cache."""
+    from linkedin_agent.adapters import get_adapter
+    _seed_prospect("targeted", linkedin_url="https://www.linkedin.com/in/cache-test")
+    cfg = _make_cfg()
+    adapter = get_adapter(cfg)
+    try:
+        daily_mod.run_daily(cfg, adapter=adapter, telegram=fake_telegram, drafter=_stub_drafter)
+    finally:
+        adapter.close()
+
+    fetch_calls = [c for c in adapter.calls if c[0] == "get_recent_posts"]
+    assert len(fetch_calls) == 1, (
+        f"expected 1 get_recent_posts call (cached), got {len(fetch_calls)}: {fetch_calls}"
+    )
+    # And the one call should have fetched limit=3 (so the connect step had
+    # enough material to reuse).
+    assert fetch_calls[0][2].get("limit") == 3
+
+
+@pytest.mark.integration
 def test_daily_drafts_connect_for_reacted(db_env, fake_telegram):
     """reacted prospects get a connect_note draft → enqueued, pushed to fake Telegram."""
     from linkedin_agent import db

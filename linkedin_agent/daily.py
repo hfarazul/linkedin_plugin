@@ -78,6 +78,12 @@ def run_daily(
     drafter = drafter or default_drafter
     result = DailyResult()
 
+    # Within a single run, react step and connect step both want recent posts
+    # for the same prospect (react picks the top one to LIKE; connect-drafter
+    # wants 2-3 for hook material). Cache the react-step fetch so the connect
+    # step reuses it instead of re-hitting Unipile.
+    posts_cache: dict[int, list] = {}
+
     db.init_db()
 
     own_adapter = False
@@ -130,9 +136,12 @@ def run_daily(
                 result.skipped_cap_hit.append("react")
                 break
             try:
-                posts = adapter.get_recent_posts(p["linkedin_url"], limit=1)
+                # Fetch 3 (not 1) so the connect-step drafter can reuse them.
+                # We still react only to posts[0] — the rest is free cache fill.
+                posts = adapter.get_recent_posts(p["linkedin_url"], limit=3)
                 if not posts:
                     continue
+                posts_cache[int(p["id"])] = posts
                 if cfg.dry_run:
                     # DRY_RUN: skip the LinkedIn write but still advance state +
                     # log the intent so subsequent daily steps see the prospect
@@ -166,7 +175,7 @@ def run_daily(
                 continue
             try:
                 body = drafter("connect_note", int(p["id"]),
-                               recent_posts=_fetch_posts_for_draft(adapter, p))
+                               recent_posts=_fetch_posts_for_draft(adapter, p, cache=posts_cache))
             except Exception as e:
                 logger.warning("connect drafter failed for prospect %d: %s", p["id"], e)
                 result.errors.append(f"connect draft p={p['id']}: {e}")
@@ -257,10 +266,19 @@ def run_daily(
     return result
 
 
-def _fetch_posts_for_draft(adapter, prospect, *, limit: int = 3) -> list[dict]:
+def _fetch_posts_for_draft(adapter, prospect, *, limit: int = 3, cache: dict | None = None) -> list[dict]:
     """Best-effort: fetch a prospect's recent posts and return them as the dict
     list the drafter expects. Returns empty list on any error so the drafter
-    can still try (and may itself bail with INSUFFICIENT_CONTEXT)."""
+    can still try (and may itself bail with INSUFFICIENT_CONTEXT).
+
+    If `cache` is provided and contains posts for this prospect (keyed by
+    int(prospect_id)), reuse those instead of hitting the adapter. The react
+    step in `run_daily` populates the cache so the connect step here can avoid
+    a second round-trip for the same profile in the same cron fire."""
+    pid = int(prospect["id"])
+    if cache is not None and pid in cache:
+        cached = cache[pid][:limit]
+        return [{"text": p.text, "posted_at": p.posted_at} for p in cached]
     try:
         posts = adapter.get_recent_posts(prospect["linkedin_url"], limit=limit)
     except Exception as e:
