@@ -43,12 +43,9 @@ def test_h_escapes_only_html_specials(raw, expected):
 
 # ===== integration: push_draft_for_approval with adversarial inputs =========
 
-@pytest.mark.integration
-def test_push_draft_for_approval_html_escapes_all_dynamic_content():
-    """Build the payload and verify nothing dynamic appears unescaped."""
-    tg = TelegramClient(_cfg())
+def _stub_post(tg):
+    """Replace the httpx client's POST with one that records and returns OK."""
     payloads = []
-    # Capture the JSON payload we'd POST without actually hitting Telegram.
     def fake_post(method_path, json=None, **kwargs):
         payloads.append((method_path, json))
         class _R:
@@ -56,8 +53,15 @@ def test_push_draft_for_approval_html_escapes_all_dynamic_content():
                 return {"ok": True, "result": {"message_id": 999}}
         return _R()
     tg._client.post = fake_post   # type: ignore
+    return payloads
 
-    # Adversarial inputs: characters that are special in Markdown (or HTML)
+
+@pytest.mark.integration
+def test_push_draft_for_approval_html_escapes_all_dynamic_content():
+    """Build the payload and verify nothing dynamic appears unescaped."""
+    tg = TelegramClient(_cfg())
+    payloads = _stub_post(tg)
+
     tg.push_draft_for_approval(
         draft_id=42,
         kind="dm1",
@@ -71,18 +75,43 @@ def test_push_draft_for_approval_html_escapes_all_dynamic_content():
 
     assert payloads, "no payload was sent"
     body_text = payloads[0][1]["text"]
-    # HTML-special chars must be escaped
-    assert "&amp;" in body_text       # & → &amp;
-    assert "&lt;" in body_text        # < → &lt;
-    assert "&gt;" in body_text        # > → &gt;
-    # Raw < / > / & must NOT appear in user-text positions (only inside HTML tags)
-    # Verify by removing the legit tags and checking for leftover unescaped specials
+    assert "&amp;" in body_text
+    assert "&lt;" in body_text
+    assert "&gt;" in body_text
+    # No unescaped specials in user-text positions
     import re
     stripped = re.sub(r"<[^>]+>", "", body_text)
     assert "<" not in stripped, f"unescaped < remains: {stripped!r}"
     assert ">" not in stripped, f"unescaped > remains: {stripped!r}"
-    # parse_mode is HTML
     assert payloads[0][1]["parse_mode"] == "HTML"
+
+
+@pytest.mark.integration
+def test_push_draft_for_approval_url_with_quote_cannot_break_parsing():
+    """A URL containing a double-quote was previously embedded inside an
+    href="..." attribute with quote=False escaping — that would have broken
+    the HTML and made Telegram reject the message. After the fix, URLs are
+    rendered as plain escaped text so attribute injection is structurally
+    impossible."""
+    tg = TelegramClient(_cfg())
+    payloads = _stub_post(tg)
+
+    weird_url = 'https://www.linkedin.com/in/test"onmouseover=evil()'
+    tg.push_draft_for_approval(
+        draft_id=1,
+        kind="connect_note",
+        body="body that is long enough to satisfy any min-length check elsewhere in the codebase",
+        prospect_name="Test User",
+        prospect_url=weird_url,
+    )
+    tg.close()
+
+    body_text = payloads[0][1]["text"]
+    # Critically: there must be NO `href=` anywhere — we render URLs as plain text
+    assert 'href=' not in body_text, f"unexpected href attribute: {body_text!r}"
+    # The bare URL text is preserved (with HTML-escape applied — quotes pass
+    # through since they're not <, >, or &)
+    assert weird_url in body_text
 
 
 @pytest.mark.integration

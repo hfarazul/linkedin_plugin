@@ -148,8 +148,11 @@ class TelegramClient:
         if campaign_name:
             header += f"  <i>[{_h(campaign_name)}]</i>"
         if prospect_url:
-            # Telegram strips href; we display the URL inline and let users tap it
-            header += f"\n<a href=\"{_h(prospect_url)}\">{_h(prospect_url)}</a>"
+            # Render the URL as plain escaped text — Telegram HTML mode auto-
+            # linkifies bare URLs, so an explicit <a href="..."> wrapper buys
+            # us nothing visually but exposes us to attribute-escape bugs
+            # (a URL containing " would break the href).
+            header += f"\n{_h(prospect_url)}"
 
         # Telegram has a 4096-char total limit. Drafts are <600 so safe.
         text = f"{header}\n\n{_h(body)}"
