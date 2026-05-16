@@ -21,4 +21,17 @@ if [ ! -f .env ]; then
     exit 1
 fi
 
+# Cron's default PATH is /usr/bin:/bin (or similar minimal). The drafter
+# shells out to `claude -p` which is typically at ~/.local/bin/claude (npm
+# global). Other deps may live in /opt/homebrew/bin. Make sure both are
+# findable regardless of who launches us.
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+
+# `claude -p` resolves its auth state via the macOS keychain, which needs
+# USER (and a logged-in user session) to be available. macOS cron passes
+# USER naturally, but launchd and some sandboxes don't — fall back to
+# whoami so the script works under any restricted env.
+export USER="${USER:-$(whoami)}"
+export LOGNAME="${LOGNAME:-$USER}"
+
 exec .venv/bin/python -m linkedin_agent daily
