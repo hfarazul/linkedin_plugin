@@ -136,3 +136,48 @@ All commands are `python -m linkedin_agent <subcommand>` (or `linkedin <subcomma
 ## Headless mode
 
 `scripts/daily_outreach.sh` is the cron entry: `0 9-16 * * 1-5 .../daily_outreach.sh >> /tmp/log 2>&1`. It calls `linkedin daily` directly — no `claude -p` involved at the cron level. The drafter subagent is the only place Claude Code is invoked, and only during drafting.
+
+## Deployment — dedicated Mac (always-on host)
+
+For 24/7 operation (so the cron fires and Telegram approvals process anytime), the recommended setup is a dedicated Mac (laptop or mini) acting as the always-on host. Steps:
+
+1. **Clone the repo** to `~/Work/Linkedin_outreach` on the host Mac.
+2. **Run setup.sh** to create the venv, install deps, pull `playwright` Chromium, initialize the DB, and copy `.env` (Unipile + Telegram creds).
+3. **Install Claude Code on the host** and run `claude /login` once — the drafter invokes `claude -p` and needs the host machine authenticated.
+4. **Install the bot daemon as a LaunchAgent**:
+   ```
+   ./scripts/install_launchd.sh
+   ```
+   This puts a plist under `~/Library/LaunchAgents/com.cortivo.linkedin-bot.plist` that:
+   - Starts the daemon on login
+   - Auto-restarts within 10s if it crashes
+   - Logs to `data/bot-daemon.{out,err}.log`
+5. **Install the daily cron** (replace path):
+   ```
+   crontab -e
+   # add:
+   0 9-16 * * 1-5 /Users/<you>/Work/Linkedin_outreach/scripts/daily_outreach.sh >> /tmp/linkedin_outreach.log 2>&1
+   ```
+6. **Prevent sleep during work hours**. macOS will suspend the daemon when the lid closes (laptop) or the system sleeps. Options:
+   - **System Settings → Lock Screen → "Prevent automatic sleeping when display is off"** (clamshell laptops)
+   - Or run `caffeinate -d &` in a startup item
+   - For a Mac mini: just set `Energy → Prevent automatic sleeping` and you're done
+7. **Verify**:
+   - `launchctl list | grep linkedin-bot` → shows the running daemon's PID
+   - `tail -f data/bot-daemon.out.log` → watch its activity in real time
+   - Open Telegram, message the bot, confirm taps still process
+
+### Daemon lifecycle commands
+- Stop:    `launchctl unload ~/Library/LaunchAgents/com.cortivo.linkedin-bot.plist`
+- Start:   `launchctl load ~/Library/LaunchAgents/com.cortivo.linkedin-bot.plist`
+- Restart: unload + load (or re-run `./scripts/install_launchd.sh` — it's idempotent)
+- Logs:    `data/bot-daemon.out.log` and `data/bot-daemon.err.log`
+
+### Migrating between Macs
+
+The only state to copy is:
+- `data/outreach.db` — SQLite, scp it
+- `.env` — secrets, scp it
+- `campaigns/*.md` — campaign briefs, already in git
+
+Re-run `./scripts/install_launchd.sh` on the new Mac and you're back online.

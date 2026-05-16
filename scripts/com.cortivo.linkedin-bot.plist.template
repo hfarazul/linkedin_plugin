@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent for the Cortivo LinkedIn outreach bot daemon.
+
+  Runs as the current user (no root). Loaded automatically on login.
+  Auto-restarts if it crashes. Logs go to data/bot-daemon.{out,err}.log.
+
+  Placeholders (replaced by install_launchd.sh):
+    __PROJECT_DIR__   absolute path to the cloned repo
+    __VENV_PYTHON__   absolute path to .venv/bin/python
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.cortivo.linkedin-bot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__VENV_PYTHON__</string>
+        <string>-m</string>
+        <string>linkedin_agent</string>
+        <string>bot-run</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_DIR__</string>
+
+    <!-- Always start the daemon on login and keep it alive. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- If it crash-loops, give it 10 seconds between retries. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- Inherit standard paths so `claude -p` is found. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <!-- Log everything to the repo's data/ folder so you can tail it. -->
+    <key>StandardOutPath</key>
+    <string>__PROJECT_DIR__/data/bot-daemon.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__PROJECT_DIR__/data/bot-daemon.err.log</string>
+</dict>
+</plist>
