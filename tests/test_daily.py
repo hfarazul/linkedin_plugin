@@ -77,15 +77,12 @@ def test_daily_empty_db(db_env, fake_telegram):
 
 
 @pytest.mark.integration
-def test_daily_reacts_to_targeted_prospects(db_env, fake_telegram, monkeypatch):
+def test_daily_reacts_to_targeted_prospects(db_env, fake_telegram):
     """targeted prospects with posts get reacted to → status flips to 'reacted'."""
     from linkedin_agent import db
     from linkedin_agent.adapters import get_adapter
     pid = _seed_prospect("targeted")
     cfg = _make_cfg()
-
-    # Force send window open so the optional step-7 flush logic is exercised
-    monkeypatch.setenv("LINKEDIN_FAKE_WINDOW", "open")
 
     adapter = get_adapter(cfg)
     try:
@@ -168,7 +165,7 @@ def test_daily_drafts_dm1_for_connected(db_env, fake_telegram):
 
 
 @pytest.mark.integration
-def test_daily_respects_react_cap(db_env, fake_telegram, monkeypatch):
+def test_daily_respects_react_cap(db_env, fake_telegram):
     """With react cap=1, only 1 of 3 targeted prospects gets reacted."""
     from linkedin_agent import db
     from linkedin_agent.adapters import get_adapter
@@ -177,7 +174,6 @@ def test_daily_respects_react_cap(db_env, fake_telegram, monkeypatch):
     _seed_prospect("targeted", linkedin_url="https://www.linkedin.com/in/test-b")
     _seed_prospect("targeted", linkedin_url="https://www.linkedin.com/in/test-c")
 
-    monkeypatch.setenv("LINKEDIN_FAKE_WINDOW", "open")
     cfg = _make_cfg(daily_max_reactions=1)
     adapter = get_adapter(cfg)
     try:
@@ -214,13 +210,14 @@ def test_daily_idempotent_within_caps(db_env, fake_telegram):
 
 
 @pytest.mark.integration
-def test_daily_skips_reactions_when_window_closed(db_env, fake_telegram, monkeypatch):
-    """When the send window is closed, the react step skips entirely and
-    targeted prospects stay 'targeted'."""
+def test_daily_reacts_regardless_of_window(db_env, fake_telegram, monkeypatch):
+    """Reactions are intentionally NOT window-gated — they're low-stakes
+    LIKEs and the daily cron's own schedule is the practical envelope.
+    Verify reactions fire even when the send window is closed."""
     from linkedin_agent import db
     from linkedin_agent.adapters import get_adapter
 
-    pid = _seed_prospect("targeted", linkedin_url="https://www.linkedin.com/in/test-windowed")
+    pid = _seed_prospect("targeted", linkedin_url="https://www.linkedin.com/in/test-weekend")
     monkeypatch.setenv("LINKEDIN_FAKE_WINDOW", "closed")
     cfg = _make_cfg()
 
@@ -232,14 +229,14 @@ def test_daily_skips_reactions_when_window_closed(db_env, fake_telegram, monkeyp
     finally:
         adapter.close()
 
-    assert result.reactions_sent == 0
-    assert "react" in result.skipped_window_steps
+    assert result.reactions_sent == 1
+    assert "react" not in result.skipped_window_steps
     refreshed = db.get_prospect(pid)
-    assert refreshed["status"] == "targeted"   # untouched
+    assert refreshed["status"] == "reacted"   # advanced even though window=closed
 
 
 @pytest.mark.integration
-def test_daily_full_chain(db_env, fake_telegram, monkeypatch):
+def test_daily_full_chain(db_env, fake_telegram):
     """Mixed-stage DB: every step does its job, no cross-contamination."""
     from linkedin_agent import db
     from linkedin_agent.adapters import get_adapter
@@ -253,7 +250,6 @@ def test_daily_full_chain(db_env, fake_telegram, monkeypatch):
     _seed_prospect("dm_sent",   linkedin_url="https://www.linkedin.com/in/p4",
                    dm_count=1, last_dm_at=five_days_ago)
 
-    monkeypatch.setenv("LINKEDIN_FAKE_WINDOW", "open")
     cfg = _make_cfg()
     adapter = get_adapter(cfg)
     try:

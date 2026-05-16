@@ -37,6 +37,21 @@ KIND_MAX_CHARS = {
     "dm3": 200,
 }
 
+# Minimum length per kind — anything shorter is almost always a degenerate
+# output (e.g. "I'll wait for your call on which path to take." was 46 chars
+# for a connect_note that should be ~200). Triggers a retry.
+KIND_MIN_CHARS = {
+    "connect_note": 100,
+    "dm1": 200,
+    "dm2": 120,
+    "dm3": 50,
+}
+
+# Auto-retry budget. The drafter is stochastic — a fresh `claude -p` call
+# usually fixes oversize/empty/short outputs. INSUFFICIENT_CONTEXT is terminal
+# (no retry) because that's the drafter being honestly stuck.
+MAX_DRAFT_ATTEMPTS = 3
+
 
 @dataclass
 class DrafterInput:
@@ -129,11 +144,17 @@ def build_input(
     )
 
 
-def render_prompt(inp: DrafterInput) -> str:
-    """Compose the full prompt sent to claude -p: subagent body + JSON context."""
+def render_prompt(inp: DrafterInput, retry_hint: str | None = None) -> str:
+    """Compose the full prompt sent to claude -p: subagent body + JSON context.
+
+    On retry, an optional hint is appended to nudge the next attempt toward
+    fixing the specific failure (oversize, too-short, etc.)."""
     base = _load_subagent_prompt()
     payload = json.dumps(asdict(inp), indent=2, ensure_ascii=False)
-    return f"{base}\n\n# Context\n\n```json\n{payload}\n```\n\nDraft now. Return only the message body."
+    closing = "Draft now. Return only the message body."
+    if retry_hint:
+        closing = f"{retry_hint}\n\n{closing}"
+    return f"{base}\n\n# Context\n\n```json\n{payload}\n```\n\n{closing}"
 
 
 # -------------------------------------------------------------- claude invoker
@@ -180,23 +201,65 @@ def draft(
     kind: str,
     prospect_id: int,
     recent_posts: Sequence[dict] | None = None,
+    max_attempts: int = MAX_DRAFT_ATTEMPTS,
 ) -> str:
-    """Generate a draft. Raises DrafterError on failure (including
-    INSUFFICIENT_CONTEXT or oversize output)."""
+    """Generate a draft, retrying on recoverable failures (oversize / empty /
+    suspiciously short). Raises DrafterError when:
+      - INSUFFICIENT_CONTEXT is returned (terminal — no retry, drafter is right)
+      - All `max_attempts` runs failed quality checks
+      - Build fails (missing prospect, invalid kind, etc.)
+    """
     inp = build_input(kind, prospect_id, recent_posts=recent_posts)
-    prompt = render_prompt(inp)
-    raw = _invoke_claude(prompt)
-    body = _clean_output(raw)
+    cap_max = KIND_MAX_CHARS[kind]
+    cap_min = KIND_MIN_CHARS.get(kind, 50)
 
-    if not body:
-        raise DrafterError("drafter returned empty output")
-    if body.strip() == INSUFFICIENT:
-        raise DrafterError("INSUFFICIENT_CONTEXT — not enough signal to draft")
+    last_failure: str | None = None
+    last_body_preview: str | None = None
+    retry_hint: str | None = None
 
-    cap = KIND_MAX_CHARS[kind]
-    if len(body) > cap:
-        raise DrafterError(
-            f"draft exceeds {cap}-char cap for {kind} (got {len(body)} chars):\n{body[:200]}…"
-        )
+    for attempt in range(1, max_attempts + 1):
+        prompt = render_prompt(inp, retry_hint=retry_hint)
+        raw = _invoke_claude(prompt)
+        body = _clean_output(raw)
 
-    return body
+        # INSUFFICIENT_CONTEXT is terminal — the drafter is telling us there
+        # genuinely isn't enough signal. Retrying just wastes tokens.
+        if body.strip() == INSUFFICIENT:
+            raise DrafterError("INSUFFICIENT_CONTEXT — not enough signal to draft")
+
+        if not body:
+            last_failure = f"empty output (attempt {attempt})"
+            retry_hint = (
+                "Your previous attempt returned an empty response. "
+                "Please produce an actual message body this time."
+            )
+            continue
+
+        if len(body) > cap_max:
+            last_failure = f"oversize {len(body)}/{cap_max} (attempt {attempt})"
+            last_body_preview = body[:180]
+            retry_hint = (
+                f"Your previous attempt was {len(body)} characters; the cap for "
+                f"`{kind}` is {cap_max}. Be tighter. Cut the second sentence "
+                f"if you have to. Keep only the most specific reference."
+            )
+            continue
+
+        if len(body) < cap_min:
+            last_failure = f"too short {len(body)}/{cap_min} (attempt {attempt})"
+            last_body_preview = body
+            retry_hint = (
+                f"Your previous attempt was only {len(body)} characters, which "
+                f"is below the {cap_min}-char minimum for a substantive "
+                f"`{kind}`. Add a specific reference from the prospect's post "
+                f"or profile and a real question. Do not return a single line."
+            )
+            continue
+
+        # All quality gates passed.
+        return body
+
+    msg = f"all {max_attempts} drafter attempts failed; last={last_failure}"
+    if last_body_preview:
+        msg += f"\nlast body preview: {last_body_preview!r}"
+    raise DrafterError(msg)

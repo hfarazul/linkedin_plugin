@@ -118,32 +118,30 @@ def run_daily(
             result.errors.append(f"poll: {e}")
 
         # --- 3. react to recent posts of targeted prospects --------------------
-        # Reactions are outbound LinkedIn writes, so they respect the send
-        # window. Drafting still happens outside hours (see steps 4-6) — it's
-        # the API-visible action that gets gated.
-        if not send_window.is_open():
-            logger.info("send window closed — skipping react step")
-            result.skipped_window_steps.append("react")
-        else:
-            for p in db.list_prospects(status="targeted", limit=10_000):
-                try:
-                    safety.check_cap(cfg, "react")
-                except safety.RateLimitExceeded:
-                    result.skipped_cap_hit.append("react")
-                    break
-                try:
-                    posts = adapter.get_recent_posts(p["linkedin_url"], limit=1)
-                    if not posts:
-                        continue
-                    adapter.react(posts[0], reaction="LIKE")
-                    db.set_status(int(p["id"]), "reacted")
-                    db.log_action(int(p["id"]), "react",
-                                  json.dumps({"post": posts[0].post_id, "via": "daily"}),
-                                  posts[0].post_id, False)
-                    result.reactions_sent += 1
-                except Exception as e:
-                    logger.warning("react failed for prospect %d: %s", p["id"], e)
-                    result.errors.append(f"react p={p['id']}: {e}")
+        # Reactions are not window-gated. LIKEs are routine LinkedIn activity
+        # that fires on weekends/evenings normally; the daily cron's own
+        # schedule (9-5 Mon-Fri by default) is the practical envelope.
+        # Connection requests and DMs are still gated — those are window-
+        # protected through the daemon's approval-send path.
+        for p in db.list_prospects(status="targeted", limit=10_000):
+            try:
+                safety.check_cap(cfg, "react")
+            except safety.RateLimitExceeded:
+                result.skipped_cap_hit.append("react")
+                break
+            try:
+                posts = adapter.get_recent_posts(p["linkedin_url"], limit=1)
+                if not posts:
+                    continue
+                adapter.react(posts[0], reaction="LIKE")
+                db.set_status(int(p["id"]), "reacted")
+                db.log_action(int(p["id"]), "react",
+                              json.dumps({"post": posts[0].post_id, "via": "daily"}),
+                              posts[0].post_id, False)
+                result.reactions_sent += 1
+            except Exception as e:
+                logger.warning("react failed for prospect %d: %s", p["id"], e)
+                result.errors.append(f"react p={p['id']}: {e}")
 
         # --- 4. connect drafts for reacted prospects ---------------------------
         # Fetch each prospect's recent posts so the drafter has something

@@ -101,29 +101,39 @@ def test_draft_rejects_insufficient_context_marker(monkeypatch, db_env):
 
 
 @pytest.mark.unit
-def test_draft_rejects_oversize_output_for_connect_note(monkeypatch, db_env):
-    """connect_note cap is 300 chars. Stubbed claude returns 400 chars → error."""
+def test_draft_gives_up_when_all_attempts_oversize(monkeypatch, db_env):
+    """connect_note cap is 300 chars. Stub returns oversize 3x → DrafterError
+    after exhausting retries."""
     from linkedin_agent import db
     pid = db.upsert_prospect("https://www.linkedin.com/in/test", full_name="Test User")
 
     oversize = "a" * 400
     monkeypatch.setattr(drafter, "_invoke_claude", lambda prompt, timeout=90: oversize)
-    with pytest.raises(DrafterError, match="exceeds 300-char cap"):
+    with pytest.raises(DrafterError, match="all 3 drafter attempts failed"):
         drafter.draft("connect_note", pid)
 
 
 @pytest.mark.unit
 def test_draft_returns_cleaned_body_on_success(monkeypatch, db_env):
+    """First-attempt success: stub returns a well-formed body of the right
+    length. _clean_output strips code fences."""
     from linkedin_agent import db
     pid = db.upsert_prospect("https://www.linkedin.com/in/test", full_name="Test User")
 
+    # ~250 chars: well within dm1 caps (200 min, 600 max)
+    body = (
+        "hey there, quick question for you — your recent post about "
+        "shipping faster than the market hit a nerve. Curious if "
+        "you've tried pairing senior engineering with AI tooling on "
+        "your v1, or if you're still riding the in-house hiring path."
+    )
     monkeypatch.setattr(
         drafter,
         "_invoke_claude",
-        lambda prompt, timeout=90: '```\nhey there, quick question for you\n```',
+        lambda prompt, timeout=90: f"```\n{body}\n```",
     )
     result = drafter.draft("dm1", pid)
-    assert result == "hey there, quick question for you"
+    assert result == body
 
 
 @pytest.mark.unit
@@ -153,3 +163,115 @@ def test_build_input_uses_no_campaign_when_unattached(db_env):
     assert inp.campaign["name"] == "(no campaign)"
     assert inp.prospect["full_name"] == "Solo Prospect"
     assert inp.prospect["first_name"] == "Solo"
+
+
+# ===== retry logic ==========================================================
+
+class _StubInvoker:
+    """Returns a queue of responses to _invoke_claude — one per attempt.
+    Useful for testing the retry loop without burning real claude -p calls."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []   # records (prompt) for assertion
+
+    def __call__(self, prompt, timeout=90):
+        self.calls.append(prompt)
+        if not self.responses:
+            raise AssertionError("test stub ran out of responses — drafter retried more than expected")
+        return self.responses.pop(0)
+
+
+@pytest.mark.unit
+def test_draft_retries_on_oversize_and_succeeds(monkeypatch, db_env):
+    from linkedin_agent import db
+    pid = db.upsert_prospect("https://www.linkedin.com/in/test", full_name="Test User")
+
+    # First attempt: 350 chars (over the 300 cap). Second: a clean 200-char body.
+    oversize = "X" * 350
+    clean = "Specific reference. " * 8 + "Worth a chat?"   # ~180 chars
+    assert len(clean) <= drafter.KIND_MAX_CHARS["connect_note"]
+    assert len(clean) >= drafter.KIND_MIN_CHARS["connect_note"]
+
+    stub = _StubInvoker([oversize, clean])
+    monkeypatch.setattr(drafter, "_invoke_claude", stub)
+
+    result = drafter.draft("connect_note", pid)
+    assert result == clean
+    assert len(stub.calls) == 2
+    # Second prompt should contain the targeted retry hint
+    assert "tighter" in stub.calls[1].lower() or "cap" in stub.calls[1].lower()
+
+
+@pytest.mark.unit
+def test_draft_retries_on_too_short_and_succeeds(monkeypatch, db_env):
+    from linkedin_agent import db
+    pid = db.upsert_prospect("https://www.linkedin.com/in/test", full_name="Test User")
+
+    too_short = "Hi there."       # 9 chars, below 100-char min for connect_note
+    clean = "X" * 200             # well within the band
+    stub = _StubInvoker([too_short, clean])
+    monkeypatch.setattr(drafter, "_invoke_claude", stub)
+
+    result = drafter.draft("connect_note", pid)
+    assert result == clean
+    assert len(stub.calls) == 2
+    assert "minimum" in stub.calls[1].lower() or "substantive" in stub.calls[1].lower()
+
+
+@pytest.mark.unit
+def test_draft_retries_on_empty_output(monkeypatch, db_env):
+    from linkedin_agent import db
+    pid = db.upsert_prospect("https://www.linkedin.com/in/test", full_name="Test User")
+
+    clean = "X" * 200
+    stub = _StubInvoker(["", clean])
+    monkeypatch.setattr(drafter, "_invoke_claude", stub)
+
+    result = drafter.draft("connect_note", pid)
+    assert result == clean
+    assert len(stub.calls) == 2
+
+
+@pytest.mark.unit
+def test_draft_gives_up_after_max_attempts(monkeypatch, db_env):
+    from linkedin_agent import db
+    pid = db.upsert_prospect("https://www.linkedin.com/in/test", full_name="Test User")
+
+    # All 3 attempts return oversize content
+    oversize = "X" * 400
+    stub = _StubInvoker([oversize, oversize, oversize])
+    monkeypatch.setattr(drafter, "_invoke_claude", stub)
+
+    with pytest.raises(drafter.DrafterError, match="all 3 drafter attempts failed"):
+        drafter.draft("connect_note", pid)
+    assert len(stub.calls) == 3
+
+
+@pytest.mark.unit
+def test_draft_does_not_retry_on_insufficient_context(monkeypatch, db_env):
+    """INSUFFICIENT_CONTEXT is the drafter being honest — no retry."""
+    from linkedin_agent import db
+    pid = db.upsert_prospect("https://www.linkedin.com/in/test", full_name="Test User")
+
+    stub = _StubInvoker([drafter.INSUFFICIENT, "X" * 200])   # second response should never run
+    monkeypatch.setattr(drafter, "_invoke_claude", stub)
+
+    with pytest.raises(drafter.DrafterError, match="INSUFFICIENT_CONTEXT"):
+        drafter.draft("connect_note", pid)
+    assert len(stub.calls) == 1   # exactly one call, no retry
+
+
+@pytest.mark.unit
+def test_draft_first_attempt_clean_does_not_retry(monkeypatch, db_env):
+    """Sanity: don't retry when the first attempt is fine."""
+    from linkedin_agent import db
+    pid = db.upsert_prospect("https://www.linkedin.com/in/test", full_name="Test User")
+
+    clean = "X" * 200
+    stub = _StubInvoker([clean, "extra response that should never run"])
+    monkeypatch.setattr(drafter, "_invoke_claude", stub)
+
+    result = drafter.draft("connect_note", pid)
+    assert result == clean
+    assert len(stub.calls) == 1
