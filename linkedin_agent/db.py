@@ -103,7 +103,7 @@ VALID_DISPOSITIONS = (
     "deferred",
 )
 
-VALID_DRAFT_KINDS = ("connect_note", "dm1", "dm2", "dm3")
+VALID_DRAFT_KINDS = ("connect_note", "dm1", "dm2", "dm3", "reply")
 VALID_DRAFT_STATUSES = ("pending", "approved", "rejected", "sent")
 VALID_CAMPAIGN_STATUSES = ("active", "paused", "archived")
 

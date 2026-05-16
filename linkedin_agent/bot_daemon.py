@@ -254,6 +254,19 @@ def send_draft_via_adapter(cfg: Config, adapter, draft, *, source: str = "cli") 
         db.record_dm(pid)
         db.log_action(pid, "dm", json.dumps({"kind": kind, "via": source}),
                       api_result, cfg.dry_run)
+    elif kind == "reply":
+        # Replies go out as DMs and count against the DM cap. They do NOT
+        # change status (prospect stays 'replied' — we're in active
+        # conversation) and they do NOT bump dm_count (that's for the initial
+        # sequence; replies are not on a follow-up cadence).
+        safety.check_cap(cfg, "dm")
+        if cfg.dry_run:
+            api_result = "dry_run"
+        else:
+            api_result = adapter.send_dm(url, body)
+        db.record_message(pid, "outbound", body)
+        db.log_action(pid, "reply_sent", json.dumps({"via": source}),
+                      api_result, cfg.dry_run)
     else:
         raise RuntimeError(f"unknown draft kind {kind!r}")
 

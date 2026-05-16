@@ -331,6 +331,73 @@ def test_draft_retries_on_spam_tell(monkeypatch, db_env):
     assert "spam-tell" in stub.calls[1].lower() or "i came across" in stub.calls[1].lower()
 
 
+# ===== reply kind ===========================================================
+
+@pytest.mark.unit
+def test_build_input_reply_loads_prior_messages(db_env):
+    """Reply kind must surface the full thread — drafter needs both the
+    outbound DM1 we sent and the inbound we're answering."""
+    from linkedin_agent import db
+    pid = db.upsert_prospect("https://www.linkedin.com/in/replier",
+                              full_name="Reply Person", headline="founder")
+    db.record_message(pid, "outbound", "Our DM1 went here", external_id="ext-1")
+    db.record_message(pid, "inbound", "Thanks for connecting, what do you build?",
+                       external_id="ext-2")
+
+    inp = drafter.build_input("reply", pid)
+    assert inp.kind == "reply"
+    assert len(inp.prior_messages) == 2
+    assert inp.prior_messages[0]["direction"] == "outbound"
+    assert inp.prior_messages[0]["body"] == "Our DM1 went here"
+    assert inp.prior_messages[1]["direction"] == "inbound"
+    assert "what do you build" in inp.prior_messages[1]["body"]
+
+
+@pytest.mark.unit
+def test_reply_kind_has_length_caps():
+    """Sanity: reply is registered in both KIND_MAX_CHARS and KIND_MIN_CHARS."""
+    assert "reply" in drafter.KIND_MAX_CHARS
+    assert "reply" in drafter.KIND_MIN_CHARS
+    assert drafter.KIND_MIN_CHARS["reply"] < drafter.KIND_MAX_CHARS["reply"]
+
+
+@pytest.mark.unit
+def test_draft_reply_succeeds_with_well_formed_body(monkeypatch, db_env):
+    """End-to-end: stub returns a reply within bounds → draft() returns it."""
+    from linkedin_agent import db
+    pid = db.upsert_prospect("https://www.linkedin.com/in/replier",
+                              full_name="Reply Person", headline="founder")
+    db.record_message(pid, "outbound", "Our DM1 went here", external_id="ext-1")
+    db.record_message(pid, "inbound", "Thanks, happy to chat.", external_id="ext-2")
+
+    body = (
+        "Glad you're open. To make the call useful: which workflow eats the "
+        "most time at the firm today — deal flow, monitoring, or memos? "
+        "Drop a couple slots that work for you and I'll lock one in."
+    )
+    monkeypatch.setattr(drafter, "_invoke_claude", lambda prompt, timeout=90: body)
+    result = drafter.draft("reply", pid)
+    assert result == body
+
+
+@pytest.mark.unit
+def test_draft_reply_rejects_one_word_ack(monkeypatch, db_env):
+    """Below 80-char min for reply — drafter should retry."""
+    from linkedin_agent import db
+    pid = db.upsert_prospect("https://www.linkedin.com/in/replier",
+                              full_name="Reply Person")
+    db.record_message(pid, "inbound", "ok cool", external_id="ext-1")
+
+    too_short = "Got it."
+    long_enough = "Glad you're open — what shape does your team's current automation footprint look like at the moment?"
+    stub = _StubInvoker([too_short, long_enough])
+    monkeypatch.setattr(drafter, "_invoke_claude", stub)
+
+    result = drafter.draft("reply", pid)
+    assert result == long_enough
+    assert len(stub.calls) == 2
+
+
 @pytest.mark.unit
 def test_draft_gives_up_after_3_spam_attempts(monkeypatch, db_env):
     """If all 3 retries produce spam tells, give up cleanly."""

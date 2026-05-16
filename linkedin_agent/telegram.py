@@ -36,6 +36,7 @@ KIND_LABELS = {
     "dm1":          "DM #1 (first message)",
     "dm2":          "DM #2 (4-day follow-up)",
     "dm3":          "DM #3 (breakup)",
+    "reply":        "Reply",
 }
 
 
@@ -134,11 +135,16 @@ class TelegramClient:
         prospect_company: str | None = None,
         prospect_url: str | None = None,
         campaign_name: str | None = None,
+        inbound_excerpt: str | None = None,
     ) -> int:
         """Format a draft and send it to chat with Approve / Edit / Reject buttons.
         All dynamic content is HTML-escaped so generated text (e.g. names with
         underscores, posts with asterisks, URLs with parens) can't break parsing.
-        Returns the Telegram message_id."""
+        Returns the Telegram message_id.
+
+        `inbound_excerpt` is optional — when provided (typically for `reply`
+        kind), it renders the prospect's incoming message above the draft so
+        you can judge the response in context on your phone."""
         label = KIND_LABELS.get(kind, kind)
         who = prospect_name or "(unknown)"
         if prospect_company:
@@ -154,8 +160,15 @@ class TelegramClient:
             # (a URL containing " would break the href).
             header += f"\n{_h(prospect_url)}"
 
+        # For replies, prepend the inbound message in a quote-block so the
+        # reviewer sees what they're responding to.
+        body_section = ""
+        if inbound_excerpt:
+            body_section = f"💬 <i>They said:</i>\n<blockquote>{_h(inbound_excerpt)}</blockquote>\n\n"
+        body_section += _h(body)
+
         # Telegram has a 4096-char total limit. Drafts are <600 so safe.
-        text = f"{header}\n\n{_h(body)}"
+        text = f"{header}\n\n{body_section}"
 
         keyboard = {
             "inline_keyboard": [[

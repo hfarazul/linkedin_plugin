@@ -30,6 +30,7 @@ class _Draft:
     prospect_company: str | None = None
     prospect_url: str | None = None
     campaign_name: str | None = None
+    inbound_excerpt: str | None = None
     telegram_message_id: int = 0
 
 
@@ -87,12 +88,14 @@ class FakeTelegramClient:
         self.callback_answers.append(_CallbackAnswer(callback_query_id, text))
 
     def push_draft_for_approval(self, draft_id, kind, body, prospect_name,
-                                prospect_company=None, prospect_url=None, campaign_name=None) -> int:
+                                prospect_company=None, prospect_url=None, campaign_name=None,
+                                inbound_excerpt=None) -> int:
         mid = self._alloc_id()
         self.drafts_pushed.append(_Draft(
             draft_id=draft_id, kind=kind, body=body,
             prospect_name=prospect_name, prospect_company=prospect_company,
             prospect_url=prospect_url, campaign_name=campaign_name,
+            inbound_excerpt=inbound_excerpt,
             telegram_message_id=mid,
         ))
         return mid

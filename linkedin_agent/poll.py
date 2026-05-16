@@ -70,8 +70,23 @@ class _UnipileMessages:
         return r.json().get("items", [])
 
 
-def poll_once(cfg: Config, limit: int = DEFAULT_BATCH, notify: bool = True) -> PollResult:
-    """Run one polling cycle. Returns a summary so cron-driven callers can log it."""
+def poll_once(
+    cfg: Config,
+    limit: int = DEFAULT_BATCH,
+    notify: bool = True,
+    *,
+    draft_replies: bool = True,
+    drafter=None,
+) -> PollResult:
+    """Run one polling cycle. Returns a summary so cron-driven callers can log it.
+
+    When `draft_replies` is True (default in production), each new inbound
+    triggers an auto-drafted reply that gets pushed to Telegram for approval.
+    If the drafter fails or returns INSUFFICIENT_CONTEXT, we fall back to the
+    plain notify_reply alert so the user is still informed."""
+    if drafter is None:
+        from .drafter import draft as default_drafter, DrafterError  # noqa
+        drafter = default_drafter
     db.init_db()
     if not (cfg.unipile_api_key and cfg.unipile_account_id and cfg.unipile_dsn):
         # Polling requires Unipile. Skip gracefully (e.g. when running daily
@@ -140,16 +155,53 @@ def poll_once(cfg: Config, limit: int = DEFAULT_BATCH, notify: bool = True) -> P
             )
 
             if tg:
-                try:
-                    tg.notify_reply(
-                        prospect_name=prospect["full_name"],
-                        prospect_company=prospect["company"],
-                        body=m.get("text") or "",
-                        thread_url=prospect["linkedin_url"],
-                    )
-                    sent_notifs += 1
-                except TelegramError as e:
-                    logger.warning("telegram notify failed: %s", e)
+                inbound_body = m.get("text") or ""
+                # Auto-draft a reply suggestion. On success we push the draft
+                # card (which embeds the inbound at the top); on failure we
+                # fall back to the plain notification so the user still sees
+                # the reply landed.
+                draft_pushed = False
+                if draft_replies and inbound_body.strip():
+                    try:
+                        reply_body = drafter("reply", int(prospect["id"]))
+                        draft_id = db.enqueue_draft(
+                            int(prospect["id"]), "reply", reply_body,
+                        )
+                        campaign_name = None
+                        if prospect["campaign_id"]:
+                            camp = db.get_campaign(int(prospect["campaign_id"]))
+                            campaign_name = camp["name"] if camp else None
+                        msg_id = tg.push_draft_for_approval(
+                            draft_id=draft_id,
+                            kind="reply",
+                            body=reply_body,
+                            prospect_name=prospect["full_name"],
+                            prospect_company=prospect["company"],
+                            prospect_url=prospect["linkedin_url"],
+                            campaign_name=campaign_name,
+                            inbound_excerpt=inbound_body,
+                        )
+                        db.set_draft_telegram_id(draft_id, msg_id)
+                        draft_pushed = True
+                        sent_notifs += 1
+                    except Exception as e:
+                        logger.warning(
+                            "auto-reply drafter failed for prospect %d: %s — "
+                            "falling back to plain notify",
+                            prospect["id"], e,
+                        )
+
+                if not draft_pushed:
+                    try:
+                        tg.notify_reply(
+                            prospect_name=prospect["full_name"],
+                            prospect_company=prospect["company"],
+                            body=inbound_body,
+                            thread_url=prospect["linkedin_url"],
+                        )
+                        sent_notifs += 1
+                    except TelegramError as e:
+                        logger.warning("telegram notify failed: %s", e)
 
     finally:
         msg_client.close()

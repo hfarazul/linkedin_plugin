@@ -35,6 +35,10 @@ KIND_MAX_CHARS = {
     "dm1": 600,
     "dm2": 400,
     "dm3": 200,
+    # Replies use the same surface as DM1 (a single DM in the thread) but the
+    # right reply is often shorter than an initiation — just enough to answer
+    # the inbound and pose the next move. 600 cap, 400 sweet spot.
+    "reply": 600,
 }
 
 # Minimum length per kind — anything shorter is almost always a degenerate
@@ -45,6 +49,10 @@ KIND_MIN_CHARS = {
     "dm1": 350,        # was 200 — DM1 now requires hook + positioning + (opt proof) + CTA
     "dm2": 120,
     "dm3": 50,
+    # Replies can be brief (e.g. "yes, Tuesday 2pm works — booked.") but a
+    # one-word ack is almost always wrong on first reply. 80 keeps room for
+    # acknowledge + content + sign-off.
+    "reply": 80,
 }
 
 # Auto-retry budget. The drafter is stochastic — a fresh `claude -p` call
@@ -150,9 +158,10 @@ def build_input(
         # return INSUFFICIENT_CONTEXT.
         campaign_ctx = {"name": "(no campaign)", "target_icp": None, "brief": ""}
 
-    # Prior thread for DM2/DM3 context.
+    # Prior thread for DM2/DM3/reply context. Replies need the full thread —
+    # the inbound we're answering is the last row.
     prior: list[dict] = []
-    if kind in ("dm2", "dm3"):
+    if kind in ("dm2", "dm3", "reply"):
         with db.connect() as conn:
             cur = conn.execute(
                 """SELECT direction, body, sent_at FROM messages

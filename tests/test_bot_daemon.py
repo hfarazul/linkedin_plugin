@@ -141,6 +141,81 @@ def test_retry_on_already_sent_is_noop(db_env):
     assert db.get_draft(did)["status"] == "sent"
 
 
+# ===== reply kind =========================================================
+
+@pytest.mark.integration
+def test_send_via_adapter_reply_routes_to_dm_keeps_status_replied(db_env, monkeypatch):
+    """Reply drafts go out as DMs but: status stays 'replied' (we're in active
+    conversation, not the initial outreach funnel), dm_count is NOT bumped
+    (replies don't trigger follow-up scheduling), and the action is logged
+    under 'reply_sent' not 'dm'."""
+    from linkedin_agent import db
+    from linkedin_agent.bot_daemon import send_draft_via_adapter
+    from linkedin_agent.adapters import get_adapter
+
+    monkeypatch.setenv("LINKEDIN_FAKE_WINDOW", "open")
+    cfg = _make_cfg(dry_run=True)
+
+    pid = db.upsert_prospect(
+        linkedin_url="https://www.linkedin.com/in/reply-test",
+        full_name="Reply Test",
+    )
+    with db.connect() as conn:
+        conn.execute("UPDATE prospects SET status='replied', dm_count=1 WHERE id=?", (pid,))
+    did = db.enqueue_draft(pid, "reply", "Glad you're open — here's a follow-up question.")
+    draft = db.get_draft(did)
+
+    adapter = get_adapter(cfg)
+    try:
+        send_draft_via_adapter(cfg, adapter, draft, source="test")
+    finally:
+        adapter.close()
+
+    refreshed = db.get_prospect(pid)
+    assert refreshed["status"] == "replied", "reply send must NOT change status from 'replied'"
+    assert refreshed["dm_count"] == 1, "reply send must NOT bump dm_count (only sequence DMs bump)"
+    assert db.get_draft(did)["status"] == "sent"
+
+    # Outbound message recorded in thread for context on future replies
+    with db.connect() as conn:
+        cur = conn.execute(
+            "SELECT direction, body FROM messages WHERE prospect_id=? ORDER BY sent_at",
+            (pid,),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    assert any(r["direction"] == "outbound" and "Glad you're open" in r["body"] for r in rows)
+
+
+@pytest.mark.integration
+def test_send_via_adapter_reply_respects_dm_cap(db_env, monkeypatch):
+    """Replies count against the DM cap, not connect."""
+    from linkedin_agent import db
+    from linkedin_agent import safety
+    from linkedin_agent.bot_daemon import send_draft_via_adapter
+    from linkedin_agent.adapters import get_adapter
+
+    monkeypatch.setenv("LINKEDIN_FAKE_WINDOW", "open")
+    cfg = _make_cfg(daily_max_dms=0, dry_run=True)
+
+    pid = db.upsert_prospect(
+        linkedin_url="https://www.linkedin.com/in/reply-cap-test",
+        full_name="Reply Cap Test",
+    )
+    did = db.enqueue_draft(pid, "reply", "Reply body that should hit the DM cap.")
+    draft = db.get_draft(did)
+
+    adapter = get_adapter(cfg)
+    try:
+        with pytest.raises(safety.RateLimitExceeded):
+            send_draft_via_adapter(cfg, adapter, draft, source="test")
+    finally:
+        adapter.close()
+
+    # Draft should NOT be marked sent — cap rejection happens before the
+    # status transition.
+    assert db.get_draft(did)["status"] == "pending"
+
+
 # ===== mark_draft_error signature ==========================================
 
 @pytest.mark.unit

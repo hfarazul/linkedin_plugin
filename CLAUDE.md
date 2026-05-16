@@ -54,7 +54,7 @@ Plus a `disposition` column (set after conversation begins):
 | Step | What | Approval needed |
 |---|---|---|
 | `campaigns sync` | Refresh DB from markdown files | — |
-| `poll` | Fetch inbound replies, halt sequences, notify Telegram | — |
+| `poll` | Fetch inbound replies, halt sequences, **auto-draft a reply** | **Yes (Telegram)** |
 | `react` | Like recent post of each `targeted` prospect → `reacted` | No (low stakes) |
 | `connect` | Draft connect note for each `reacted` prospect | **Yes (Telegram)** |
 | `dm1` | Draft first DM for each `connected` prospect with `dm_count=0` | **Yes (Telegram)** |
@@ -69,7 +69,7 @@ You as the agency owner only see Telegram approval cards on your phone. Tap to a
 The cron handles everything *mechanical*. Claude Code is for the parts that benefit from judgment:
 
 1. **Creating a new campaign** — follow the protocol in the next section. Don't just `campaign create` and let the user write a brief in the dark.
-2. **Replying to an interested prospect.** When a reply lands, the user often pastes the inbound text into Claude Code and asks for a thoughtful response. Read the prior thread (in `messages` table) for context.
+2. **Recrafting a reply that the auto-drafter got wrong.** Replies are auto-drafted by `poll` and pushed to Telegram alongside the inbound message. Most are good enough to Approve or Edit on phone. But for nuanced replies — pricing pushback, scope negotiation, scheduling — the user will reject the phone draft and ask Claude Code for a better one. Read the full thread (`messages` table for that prospect) and the campaign brief, draft, send via `linkedin dm <pid> "..."`.
 3. **Tuning the drafter prompt.** If drafts feel off, iterate on `.claude/agents/message-drafter.md`. Edit and immediately rerun `linkedin daily` to see the new style.
 4. **One-off prospect work.** "Draft a custom DM2 for prospect 5 — they replied with a question about pricing." Use the message-drafter subagent directly.
 
