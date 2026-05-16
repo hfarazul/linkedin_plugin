@@ -105,14 +105,21 @@ class BotDaemon:
             self.tg.answer_callback(cb_id, "Draft not found")
             return
 
-        # Idempotency: if already decided, don't re-do it.
-        if draft["status"] in ("approved", "sent", "rejected") and action in ("approve", "reject"):
+        # Idempotency: if already terminal, don't re-do it. Note 'approved'
+        # is NOT terminal — that's the queued-outside-window state, and a
+        # retry tap should still flush. 'sent' and 'rejected' are terminal.
+        terminal_actions = ("approve", "reject", "retry", "giveup")
+        if draft["status"] in ("sent", "rejected") and action in terminal_actions:
             self.tg.answer_callback(cb_id, f"Already {draft['status']}")
             return
 
-        if action == "approve":
+        if action == "approve" or action == "retry":
+            # Retry on a previously-failed send walks the same path as approve.
+            # _approve handles the idempotency check (which counts the draft
+            # as still-actionable after mark_draft_error since we don't change
+            # its status on failure).
             self._approve(cb_id, draft, message_id)
-        elif action == "reject":
+        elif action == "reject" or action == "giveup":
             self._reject(cb_id, draft, message_id)
         elif action == "edit":
             self._start_edit(cb_id, draft)
@@ -127,9 +134,11 @@ class BotDaemon:
             db.set_draft_status(draft["id"], "approved")
             self.tg.answer_callback(cb_id, "Approved — queued for next window")
             when = send_window.format_next_open()
+            # HTML-escape so a body containing &, <, > can't break parsing.
+            from .telegram import _h
             self.tg.edit_message(
                 message_id,
-                f"⏸️ *Approved* — queued for {when}\n\n{draft['body']}",
+                f"⏸️ <b>Approved</b> — queued for {_h(when)}\n\n{_h(draft['body'])}",
                 reply_markup={"inline_keyboard": []},
             )
             return
@@ -139,11 +148,11 @@ class BotDaemon:
             self._send_via_adapter(draft)
         except safety.RateLimitExceeded as e:
             self.tg.answer_callback(cb_id, f"Cap hit: {e}")
-            self.tg.mark_draft_error(message_id, draft["body"], str(e))
+            self.tg.mark_draft_error(message_id, draft["body"], str(e), draft_id=draft["id"])
             return
         except Exception as e:
             logger.exception("send failed for draft %s", draft["id"])
-            self.tg.mark_draft_error(message_id, draft["body"], str(e)[:200])
+            self.tg.mark_draft_error(message_id, draft["body"], str(e)[:200], draft_id=draft["id"])
             return
         now_local = datetime.now().strftime("%H:%M")
         self.tg.mark_draft_sent(message_id, draft["body"], now_local)
@@ -211,7 +220,12 @@ class BotDaemon:
 def send_draft_via_adapter(cfg: Config, adapter, draft, *, source: str = "cli") -> None:
     """Translate a pending_draft into the right adapter call. Updates DB on
     success. Caller handles exceptions for telemetry/UI feedback. Module-level
-    so both the bot daemon and `send-approved` CLI can call it."""
+    so both the bot daemon and `send-approved` CLI can call it.
+
+    When cfg.dry_run is True, the LinkedIn write is skipped but the local
+    state still advances (prospect status, dm_count, draft marked sent) so
+    the rest of the pipeline behaves identically to a real send. The action
+    log records dry_run=True so the audit trail makes the distinction clear."""
     prospect = db.get_prospect(draft["prospect_id"])
     if not prospect:
         raise RuntimeError(f"prospect {draft['prospect_id']} missing")
@@ -222,16 +236,24 @@ def send_draft_via_adapter(cfg: Config, adapter, draft, *, source: str = "cli") 
 
     if kind == "connect_note":
         safety.check_cap(cfg, "connect")
-        result = adapter.send_connection(url, note=body)
+        if cfg.dry_run:
+            api_result = "dry_run"
+        else:
+            api_result = adapter.send_connection(url, note=body)
         db.set_status(pid, "connection_sent")
-        db.log_action(pid, "connect", json.dumps({"note": body[:200], "via": source}), result, False)
+        db.log_action(pid, "connect", json.dumps({"note": body[:200], "via": source}),
+                      api_result, cfg.dry_run)
     elif kind in ("dm1", "dm2", "dm3"):
         safety.check_cap(cfg, "dm")
-        result = adapter.send_dm(url, body)
+        if cfg.dry_run:
+            api_result = "dry_run"
+        else:
+            api_result = adapter.send_dm(url, body)
         db.set_status(pid, "dm_sent")
         db.record_message(pid, "outbound", body)
         db.record_dm(pid)
-        db.log_action(pid, "dm", json.dumps({"kind": kind, "via": source}), result, False)
+        db.log_action(pid, "dm", json.dumps({"kind": kind, "via": source}),
+                      api_result, cfg.dry_run)
     else:
         raise RuntimeError(f"unknown draft kind {kind!r}")
 

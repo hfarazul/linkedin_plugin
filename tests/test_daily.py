@@ -210,6 +210,91 @@ def test_daily_idempotent_within_caps(db_env, fake_telegram):
 
 
 @pytest.mark.integration
+def test_daily_react_respects_dry_run(db_env, fake_telegram):
+    """DRY_RUN must propagate to the daily react step — state advances but
+    no LinkedIn write happens and the action log marks dry_run=True."""
+    import sqlite3
+    from linkedin_agent import db
+    from linkedin_agent.adapters import get_adapter
+
+    pid = _seed_prospect("targeted", linkedin_url="https://www.linkedin.com/in/test-dry")
+    cfg = _make_cfg(dry_run=True)
+
+    react_calls = []
+    adapter = get_adapter(cfg)
+    # Wrap adapter.react to detect any real call (there should be none).
+    real_react = adapter.react
+    def counting_react(*args, **kwargs):
+        react_calls.append((args, kwargs))
+        return real_react(*args, **kwargs)
+    adapter.react = counting_react
+
+    try:
+        result = daily_mod.run_daily(
+            cfg, adapter=adapter, telegram=fake_telegram, drafter=_stub_drafter,
+        )
+    finally:
+        adapter.close()
+
+    assert result.reactions_sent == 1
+    assert react_calls == []        # the only assertion that matters
+    refreshed = db.get_prospect(pid)
+    assert refreshed["status"] == "reacted"   # state still advanced
+    # action log records dry_run=True
+    conn = sqlite3.connect(db_env["LINKEDIN_DB_PATH"])
+    rows = conn.execute("SELECT result, dry_run FROM actions WHERE kind='react'").fetchall()
+    conn.close()
+    assert len(rows) == 1
+    assert rows[0][0] == "dry_run"
+    assert rows[0][1] == 1
+
+
+@pytest.mark.integration
+def test_send_draft_via_adapter_respects_dry_run(db_env):
+    """DRY_RUN must propagate to send_draft_via_adapter — used by both bot
+    daemon (approval) and send-approved CLI."""
+    import sqlite3
+    from linkedin_agent import db
+    from linkedin_agent.adapters import get_adapter
+    from linkedin_agent.bot_daemon import send_draft_via_adapter
+
+    pid = _seed_prospect("connected", linkedin_url="https://www.linkedin.com/in/test-send-dry")
+    draft_id = db.enqueue_draft(pid, "dm1", "test body content for dry run path")
+    db.set_draft_status(draft_id, "approved")
+
+    cfg = _make_cfg(dry_run=True)
+    adapter = get_adapter(cfg)
+    dm_calls = []
+    real_send_dm = adapter.send_dm
+    def counting_send_dm(*args, **kwargs):
+        dm_calls.append((args, kwargs))
+        return real_send_dm(*args, **kwargs)
+    adapter.send_dm = counting_send_dm
+
+    try:
+        draft = db.get_draft(draft_id)
+        send_draft_via_adapter(cfg, adapter, draft, source="test")
+    finally:
+        adapter.close()
+
+    assert dm_calls == []                       # no LinkedIn write
+    refreshed = db.get_prospect(pid)
+    assert refreshed["status"] == "dm_sent"     # state advanced
+    assert refreshed["dm_count"] == 1           # follow-up tracking still ticked
+    draft = db.get_draft(draft_id)
+    assert draft["status"] == "sent"
+    # log marks dry_run=True
+    conn = sqlite3.connect(db_env["LINKEDIN_DB_PATH"])
+    row = conn.execute(
+        "SELECT result, dry_run FROM actions WHERE kind='dm' AND prospect_id=?",
+        (pid,),
+    ).fetchone()
+    conn.close()
+    assert row[0] == "dry_run"
+    assert row[1] == 1
+
+
+@pytest.mark.integration
 def test_daily_reacts_regardless_of_window(db_env, fake_telegram, monkeypatch):
     """Reactions are intentionally NOT window-gated — they're low-stakes
     LIKEs and the daily cron's own schedule is the practical envelope.

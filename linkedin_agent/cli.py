@@ -172,6 +172,9 @@ def dm(prospect_id: int, body: str) -> None:
         result = adapter.send_dm(p["linkedin_url"], body)
         db.log_action(prospect_id, "dm", body[:200], result, False)
         db.record_message(prospect_id, "outbound", body)
+        # Bump dm_count + last_dm_at so follow-up scheduler picks this up at
+        # the right cadence — same as the bot daemon's approval-send path.
+        db.record_dm(prospect_id)
         db.set_status(prospect_id, "dm_sent")
         safety.human_delay(cfg)
         console.print(f"[green]✓[/green] DM sent to {p['full_name'] or p['linkedin_url']}")

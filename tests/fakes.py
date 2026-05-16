@@ -103,8 +103,21 @@ class FakeTelegramClient:
     def mark_draft_rejected(self, message_id, original_body) -> None:
         self.marked_rejected.append((message_id, original_body))
 
-    def mark_draft_error(self, message_id, original_body, error) -> None:
+    def mark_draft_error(self, message_id, original_body, error, draft_id=None) -> None:
         self.marked_errored.append((message_id, original_body, error))
+        # Mirror real behaviour: record an edit with retry/giveup buttons
+        # keyed off draft_id so tests can assert on the callback payload.
+        if draft_id is not None:
+            self.edits.append(_Edit(
+                message_id=message_id,
+                text=f"⚠️ Send failed: {error}\n\n{original_body}",
+                reply_markup={
+                    "inline_keyboard": [[
+                        {"text": "🔄 Retry", "callback_data": f"retry:{draft_id}"},
+                        {"text": "❌ Give up", "callback_data": f"giveup:{draft_id}"},
+                    ]]
+                },
+            ))
 
     def request_edit(self, draft_id, original_body) -> int:
         self.edit_requests.append(draft_id)

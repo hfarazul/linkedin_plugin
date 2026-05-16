@@ -168,8 +168,13 @@ def test_dm_transitions_status_and_records_message(env: dict[str, str]) -> None:
     result = _run(["dm", "1", body], env)
     assert "DM sent to" in result.stdout
 
-    rows = _db_query(env["LINKEDIN_DB_PATH"], "SELECT status FROM prospects WHERE id=1")
+    rows = _db_query(env["LINKEDIN_DB_PATH"],
+                     "SELECT status, dm_count, last_dm_at FROM prospects WHERE id=1")
     assert rows[0]["status"] == "dm_sent"
+    # Regression guard: CLI dm must bump dm_count + last_dm_at so the
+    # follow-up scheduler can find this prospect for DM2.
+    assert rows[0]["dm_count"] == 1
+    assert rows[0]["last_dm_at"] is not None
 
     msgs = _db_query(env["LINKEDIN_DB_PATH"], "SELECT * FROM messages WHERE prospect_id=1")
     assert len(msgs) == 1

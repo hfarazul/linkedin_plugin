@@ -133,11 +133,20 @@ def run_daily(
                 posts = adapter.get_recent_posts(p["linkedin_url"], limit=1)
                 if not posts:
                     continue
-                adapter.react(posts[0], reaction="LIKE")
-                db.set_status(int(p["id"]), "reacted")
-                db.log_action(int(p["id"]), "react",
-                              json.dumps({"post": posts[0].post_id, "via": "daily"}),
-                              posts[0].post_id, False)
+                if cfg.dry_run:
+                    # DRY_RUN: skip the LinkedIn write but still advance state +
+                    # log the intent so subsequent daily steps see the prospect
+                    # as reacted (mirrors the CLI react command's behavior).
+                    db.set_status(int(p["id"]), "reacted")
+                    db.log_action(int(p["id"]), "react",
+                                  json.dumps({"post": posts[0].post_id, "via": "daily"}),
+                                  "dry_run", True)
+                else:
+                    adapter.react(posts[0], reaction="LIKE")
+                    db.set_status(int(p["id"]), "reacted")
+                    db.log_action(int(p["id"]), "react",
+                                  json.dumps({"post": posts[0].post_id, "via": "daily"}),
+                                  posts[0].post_id, False)
                 result.reactions_sent += 1
             except Exception as e:
                 logger.warning("react failed for prospect %d: %s", p["id"], e)

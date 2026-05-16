@@ -10,6 +10,7 @@ from __future__ import annotations
 #   • get_updates                 — long-polling primitive used by the bot
 #                                    daemon to receive callbacks and replies.
 
+import html
 import json
 import textwrap
 from dataclasses import dataclass
@@ -18,6 +19,16 @@ from typing import Any
 import httpx
 
 from .config import Config
+
+
+def _h(text: str | None) -> str:
+    """HTML-escape user/generated text for safe Telegram embedding.
+    Telegram's HTML parse mode only treats &, <, > as special — three chars,
+    handled by stdlib html.escape. Markdown by contrast has ~12 special chars
+    and ambiguous escape rules that bite on real-world content."""
+    if not text:
+        return ""
+    return html.escape(text, quote=False)
 
 
 KIND_LABELS = {
@@ -66,10 +77,12 @@ class TelegramClient:
         text: str,
         *,
         reply_markup: dict | None = None,
-        parse_mode: str | None = "Markdown",
+        parse_mode: str | None = "HTML",
         disable_preview: bool = True,
     ) -> int:
-        """Send a plain message to the configured chat. Returns message_id."""
+        """Send a message to the configured chat. Defaults to HTML parse mode
+        (callers must HTML-escape any user/generated text via _h()). Pass
+        parse_mode=None for plain text. Returns message_id."""
         payload = {
             "chat_id": self.cfg.telegram_chat_id,
             "text": text,
@@ -88,7 +101,7 @@ class TelegramClient:
         new_text: str,
         *,
         reply_markup: dict | None = None,
-        parse_mode: str | None = "Markdown",
+        parse_mode: str | None = "HTML",
     ) -> None:
         payload = {
             "chat_id": self.cfg.telegram_chat_id,
@@ -123,20 +136,23 @@ class TelegramClient:
         campaign_name: str | None = None,
     ) -> int:
         """Format a draft and send it to chat with Approve / Edit / Reject buttons.
-        Returns the Telegram message_id (stored on pending_drafts.telegram_message_id)."""
+        All dynamic content is HTML-escaped so generated text (e.g. names with
+        underscores, posts with asterisks, URLs with parens) can't break parsing.
+        Returns the Telegram message_id."""
         label = KIND_LABELS.get(kind, kind)
         who = prospect_name or "(unknown)"
         if prospect_company:
             who += f" — {prospect_company}"
 
-        header = f"📝 *{label}* → *{who}*"
+        header = f"📝 <b>{_h(label)}</b> → <b>{_h(who)}</b>"
         if campaign_name:
-            header += f"  _[{campaign_name}]_"
+            header += f"  <i>[{_h(campaign_name)}]</i>"
         if prospect_url:
-            header += f"\n[{prospect_url}]({prospect_url})"
+            # Telegram strips href; we display the URL inline and let users tap it
+            header += f"\n<a href=\"{_h(prospect_url)}\">{_h(prospect_url)}</a>"
 
         # Telegram has a 4096-char total limit. Drafts are <600 so safe.
-        text = f"{header}\n\n{body}"
+        text = f"{header}\n\n{_h(body)}"
 
         keyboard = {
             "inline_keyboard": [[
@@ -148,30 +164,26 @@ class TelegramClient:
         return self.send_message(text, reply_markup=keyboard)
 
     def mark_draft_sent(self, message_id: int, original_body: str, when: str) -> None:
-        new_text = textwrap.dedent(f"""\
-            ✅ *Sent at {when}*
-
-            {original_body}""")
+        new_text = f"✅ <b>Sent at {_h(when)}</b>\n\n{_h(original_body)}"
         self.edit_message(message_id, new_text, reply_markup={"inline_keyboard": []})
 
     def mark_draft_rejected(self, message_id: int, original_body: str) -> None:
-        new_text = textwrap.dedent(f"""\
-            ❌ *Rejected*
-
-            ~{original_body}~""")
+        new_text = f"❌ <b>Rejected</b>\n\n<s>{_h(original_body)}</s>"
         self.edit_message(message_id, new_text, reply_markup={"inline_keyboard": []})
 
-    def mark_draft_error(self, message_id: int, original_body: str, error: str) -> None:
-        new_text = textwrap.dedent(f"""\
-            ⚠️ *Send failed:* `{error}`
-
-            {original_body}
-
-            (Re-tap Approve to retry.)""")
+    def mark_draft_error(self, message_id: int, original_body: str, error: str,
+                          draft_id: int) -> None:
+        """Show send failure with retry/giveup buttons. The callbacks carry
+        the draft_id (not the telegram message_id) so the daemon can route
+        them to the right pending_drafts row."""
+        new_text = (
+            f"⚠️ <b>Send failed:</b> <code>{_h(error)}</code>\n\n"
+            f"{_h(original_body)}"
+        )
         keyboard = {
             "inline_keyboard": [[
-                {"text": "🔄 Retry", "callback_data": f"retry:{message_id}"},
-                {"text": "❌ Give up", "callback_data": f"giveup:{message_id}"},
+                {"text": "🔄 Retry", "callback_data": f"retry:{draft_id}"},
+                {"text": "❌ Give up", "callback_data": f"giveup:{draft_id}"},
             ]]
         }
         self.edit_message(message_id, new_text, reply_markup=keyboard)
@@ -181,13 +193,13 @@ class TelegramClient:
         message_id, which the daemon uses to match the next reply to this draft."""
         prompt = (
             f"✏️ Replying to draft #{draft_id}\n\n"
-            f"Current text:\n```\n{original_body}\n```\n"
+            f"Current text:\n<pre>{_h(original_body)}</pre>\n"
             f"Reply to this message with the new text."
         )
         payload = {
             "chat_id": self.cfg.telegram_chat_id,
             "text": prompt,
-            "parse_mode": "Markdown",
+            "parse_mode": "HTML",
             "reply_markup": {"force_reply": True, "selective": False},
         }
         result = self._call("sendMessage", **payload)
