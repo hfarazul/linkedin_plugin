@@ -177,8 +177,22 @@ def run_daily(
                 body = drafter("connect_note", int(p["id"]),
                                recent_posts=_fetch_posts_for_draft(adapter, p, cache=posts_cache))
             except Exception as e:
-                logger.warning("connect drafter failed for prospect %d: %s", p["id"], e)
-                result.errors.append(f"connect draft p={p['id']}: {e}")
+                if _is_terminal_drafter_failure(e):
+                    # Drafter explicitly told us this prospect can't be drafted
+                    # (no specific signal to reference). Mark them skipped so
+                    # subsequent cron fires don't waste a `claude -p` call on
+                    # the same hopeless case. Not counted as an error — this
+                    # is the system honoring an intended terminal signal.
+                    db.set_status(int(p["id"]), "skipped")
+                    db.log_action(
+                        int(p["id"]), "skipped_drafter",
+                        json.dumps({"kind": "connect_note", "reason": "INSUFFICIENT_CONTEXT"}),
+                        "skipped", False,
+                    )
+                    logger.info("prospect %d marked skipped — drafter INSUFFICIENT_CONTEXT", p["id"])
+                else:
+                    logger.warning("connect drafter failed for prospect %d: %s", p["id"], e)
+                    result.errors.append(f"connect draft p={p['id']}: {e}")
                 continue
             did = db.enqueue_draft(int(p["id"]), "connect_note", body)
             _push_to_telegram(telegram, did, "connect_note", body, p)
@@ -264,6 +278,19 @@ def run_daily(
             telegram.close()
 
     return result
+
+
+def _is_terminal_drafter_failure(exc: Exception) -> bool:
+    """A drafter that returns INSUFFICIENT_CONTEXT is telling us this prospect
+    genuinely can't be drafted — no useful signal in their profile/posts to
+    reference. That's a terminal signal: retrying every 3 hours wastes
+    `claude -p` calls and produces noise in the Telegram summary.
+
+    Distinguishing this from transient failures (claude binary errors, network
+    blips) matters — we only auto-skip on the terminal signal. The
+    INSUFFICIENT_CONTEXT marker is encoded in DrafterError's message by
+    drafter.draft() — see drafter.py."""
+    return "INSUFFICIENT_CONTEXT" in str(exc)
 
 
 def _fetch_posts_for_draft(adapter, prospect, *, limit: int = 3, cache: dict | None = None) -> list[dict]:

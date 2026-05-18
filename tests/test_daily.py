@@ -147,6 +147,73 @@ def test_daily_caches_posts_across_react_and_connect(db_env, fake_telegram):
 
 
 @pytest.mark.integration
+def test_daily_auto_skips_prospect_on_insufficient_context(db_env, fake_telegram):
+    """When the drafter raises INSUFFICIENT_CONTEXT (the canonical terminal
+    signal), the prospect should be auto-marked 'skipped' so subsequent cron
+    fires don't keep waste claude -p calls on the same hopeless case. This
+    failure mode is NOT counted in result.errors — it's an intended outcome."""
+    from linkedin_agent import db
+    from linkedin_agent.adapters import get_adapter
+    from linkedin_agent.drafter import DrafterError
+
+    pid = _seed_prospect("reacted")
+    cfg = _make_cfg()
+
+    def insufficient_context_drafter(kind, prospect_id, recent_posts=None):
+        raise DrafterError("INSUFFICIENT_CONTEXT — not enough signal to draft")
+
+    adapter = get_adapter(cfg)
+    try:
+        result = daily_mod.run_daily(
+            cfg, adapter=adapter, telegram=fake_telegram,
+            drafter=insufficient_context_drafter,
+        )
+    finally:
+        adapter.close()
+
+    # Prospect is now skipped — won't be tried again
+    refreshed = db.get_prospect(pid)
+    assert refreshed["status"] == "skipped"
+    # And it's NOT counted as an error in the daily summary
+    assert result.errors == []
+    # No draft was enqueued
+    assert result.connect_drafts == 0
+
+
+@pytest.mark.integration
+def test_daily_does_not_auto_skip_on_transient_drafter_failure(db_env, fake_telegram):
+    """A non-terminal failure (claude binary error, timeout) should keep the
+    prospect in 'reacted' status — the next cron fire will retry. This is the
+    difference from INSUFFICIENT_CONTEXT: that's the drafter being honest,
+    while exit-1 with empty stderr might be a transient cron-env issue."""
+    from linkedin_agent import db
+    from linkedin_agent.adapters import get_adapter
+    from linkedin_agent.drafter import DrafterError
+
+    pid = _seed_prospect("reacted")
+    cfg = _make_cfg()
+
+    def claude_binary_failure_drafter(kind, prospect_id, recent_posts=None):
+        raise DrafterError("claude -p exited 1\nstderr:\n")
+
+    adapter = get_adapter(cfg)
+    try:
+        result = daily_mod.run_daily(
+            cfg, adapter=adapter, telegram=fake_telegram,
+            drafter=claude_binary_failure_drafter,
+        )
+    finally:
+        adapter.close()
+
+    # Prospect stays at 'reacted' so the next fire retries
+    refreshed = db.get_prospect(pid)
+    assert refreshed["status"] == "reacted"
+    # And IS counted as an error in the summary so the user knows something broke
+    assert len(result.errors) == 1
+    assert "exited 1" in result.errors[0]
+
+
+@pytest.mark.integration
 def test_daily_drafts_connect_for_reacted(db_env, fake_telegram):
     """reacted prospects get a connect_note draft → enqueued, pushed to fake Telegram."""
     from linkedin_agent import db
