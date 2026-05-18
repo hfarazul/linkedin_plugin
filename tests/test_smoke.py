@@ -310,6 +310,42 @@ def test_search_with_campaign_attaches_prospects(env: dict[str, str]) -> None:
             p.unlink()
 
 
+def test_search_posts_imports_authors_with_pitch_context(env: dict[str, str]) -> None:
+    """search-posts imports the post AUTHOR as the prospect and stashes the
+    post text as pitch_context — so the drafter can reference what they wrote.
+    """
+    import time
+    _run(["init"], env)
+    slug = f"sp{int(time.time()*1000) % 100000}"
+    try:
+        _run(["campaign", "create", slug], env)
+        _run([
+            "search-posts", "looking for technical co-founder",
+            "--limit", "3", "--campaign", slug,
+            "--date-posted", "past_month",
+            "--author-keywords", "founder",
+        ], env)
+        rows = _db_query(
+            env["LINKEDIN_DB_PATH"],
+            """SELECT p.id, p.full_name, p.pitch_context
+               FROM prospects p JOIN campaigns c ON p.campaign_id = c.id
+               WHERE c.slug = ?""",
+            (slug,),
+        )
+        assert len(rows) == 3, f"expected 3 imports, got {len(rows)}"
+        # Every imported prospect has pitch_context populated with the post text
+        for r in rows:
+            assert r["pitch_context"], f"prospect {r['id']} missing pitch_context"
+            assert "non-tech founder" in r["pitch_context"].lower(), (
+                f"pitch_context for {r['id']} doesn't look like the post: {r['pitch_context']!r}"
+            )
+    finally:
+        from linkedin_agent import campaigns as campaigns_mod
+        p = campaigns_mod.brief_path_for(slug)
+        if p.exists():
+            p.unlink()
+
+
 # --------------------------------------------------------------------------- draft state machine
 
 

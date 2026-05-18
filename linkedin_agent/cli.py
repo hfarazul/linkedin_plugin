@@ -147,6 +147,73 @@ def search(query: str, limit: int, campaign: str | None) -> None:
         adapter.close()
 
 
+@cli.command("search-posts")
+@click.argument("keywords")
+@click.option("--limit", default=10, type=int, help="Max posts to import.")
+@click.option("--campaign", default=None, help="Slug of the campaign to attach new prospects to.")
+@click.option("--date-posted", default="past_month",
+              type=click.Choice(["past_24h", "past_week", "past_month"]),
+              help="Recency filter on the post.")
+@click.option("--author-keywords", default=None,
+              help="Bias author selection (e.g. 'founder' to exclude CTOs offering services).")
+def search_posts(keywords: str, limit: int, campaign: str | None,
+                 date_posted: str, author_keywords: str | None) -> None:
+    """Search LinkedIn POSTS by keyword, import authors as prospects.
+
+    Unlike `search` (which matches profile headlines), this hits LinkedIn's
+    post-content index — so a query like "looking for technical co-founder"
+    surfaces people who actually wrote that, not people who put it in their
+    headline as a service offering.
+
+    The matched post's text is stashed as the prospect's pitch_context so
+    the drafter can reference what they actually wrote.
+    """
+    cfg, adapter = _adapter()
+    campaign_id = None
+    if campaign:
+        row = db.get_campaign(campaign)
+        if not row:
+            console.print(f"[red]no campaign with slug {campaign!r}[/red]")
+            sys.exit(1)
+        campaign_id = int(row["id"])
+    try:
+        safety.check_cap(cfg, "search")
+        try:
+            hits = adapter.search_posts(
+                keywords, limit=limit,
+                date_posted=date_posted,
+                author_keywords=author_keywords,
+            )
+        except NotImplementedError:
+            console.print(f"[red]post-search not supported by backend {cfg.backend}[/red]")
+            sys.exit(1)
+        imported = 0
+        for h in hits:
+            pid = db.upsert_prospect(
+                linkedin_url=h.author.linkedin_url,
+                full_name=h.author.full_name,
+                headline=h.author.headline,
+                location=h.author.location,
+                campaign_id=campaign_id,
+                provider_id=h.author.provider_id,
+                pitch_context=h.post_text,
+            )
+            db.log_action(
+                pid, "search-posts",
+                json.dumps({"query": keywords, "campaign": campaign,
+                            "post_url": h.post_url, "date_posted": date_posted}),
+                h.author.linkedin_url, cfg.dry_run,
+            )
+            imported += 1
+        suffix = f" → campaign [bold]{campaign}[/bold]" if campaign else ""
+        console.print(
+            f"[green]✓[/green] imported {imported} prospects from posts matching "
+            f"[bold]{keywords!r}[/bold] (date: {date_posted}){suffix}"
+        )
+    finally:
+        adapter.close()
+
+
 @cli.command()
 @click.argument("prospect_id", type=int)
 @click.option("--limit", default=3)

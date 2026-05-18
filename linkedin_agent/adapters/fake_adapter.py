@@ -4,7 +4,7 @@ from __future__ import annotations
 # Wire by setting LINKEDIN_BACKEND=fake in .env.
 
 from ..config import Config
-from .base import LinkedInAdapter, Post, ProspectHit
+from .base import LinkedInAdapter, Post, PostHit, ProspectHit
 
 
 class FakeAdapter(LinkedInAdapter):
@@ -28,6 +28,29 @@ class FakeAdapter(LinkedInAdapter):
             )
             for i in range(1, limit + 1)
         ]
+
+    def search_posts(self, keywords: str, *, limit: int = 20,
+                     date_posted: str = "past_month",
+                     author_keywords: str | None = None) -> list[PostHit]:
+        self._record("search_posts", keywords, limit=limit,
+                     date_posted=date_posted, author_keywords=author_keywords)
+        out: list[PostHit] = []
+        for i in range(1, limit + 1):
+            slug = f"fake-post-author-{i}-{keywords.replace(' ', '-')[:30]}".lower()
+            author = ProspectHit(
+                linkedin_url=f"https://www.linkedin.com/in/{slug}",
+                full_name=f"Fake Author {i}",
+                headline=f"Founder building {keywords[:40]}",
+                location="San Francisco, CA",
+                provider_id=f"ACo{slug.replace('-', '_')}",
+            )
+            out.append(PostHit(
+                author=author,
+                post_text=f"Hey LinkedIn — I'm a non-tech founder working on {keywords}. {i}",
+                post_url=f"https://www.linkedin.com/feed/update/urn:li:activity:fake-{i}",
+                posted_at="2026-05-17T12:00:00Z",
+            ))
+        return out
 
     def get_recent_posts(self, linkedin_url: str, limit: int = 5) -> list[Post]:
         self._record("get_recent_posts", linkedin_url, limit=limit)

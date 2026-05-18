@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 import httpx
 
 from ..config import Config
-from .base import LinkedInAdapter, Post, ProspectHit
+from .base import LinkedInAdapter, Post, PostHit, ProspectHit
 
 
 _PROVIDER_ID_RE = re.compile(r"^ACo[A-Za-z0-9_\-]+$")
@@ -86,6 +86,57 @@ class UnipileAdapter(LinkedInAdapter):
                 headline=it.get("headline"),
                 location=it.get("location"),
                 provider_id=it.get("id"),
+            ))
+        return out
+
+    def search_posts(
+        self, keywords: str, *, limit: int = 20,
+        date_posted: str = "past_month",
+        author_keywords: str | None = None,
+    ) -> list[PostHit]:
+        """Search LinkedIn post content (not profile headlines). Returns posts
+        with their author profiles so we can import the right person and stash
+        the post text as pitch_context. Same endpoint as `search()` — just a
+        different `category` and filter set."""
+        body: dict = {
+            "api": "classic",
+            "category": "posts",
+            "keywords": keywords,
+            "sort_by": "date",
+            "date_posted": date_posted,
+        }
+        if author_keywords:
+            body["author"] = {"keywords": author_keywords}
+        r = self._client.post(
+            "/linkedin/search",
+            params={"account_id": self.cfg.unipile_account_id, "limit": limit},
+            json=body,
+        )
+        r.raise_for_status()
+        items = r.json().get("items", [])
+        out: list[PostHit] = []
+        for it in items[:limit]:
+            author = it.get("author") or {}
+            # Author shape varies — try a few fields. public_identifier is
+            # most reliable when present; fall back to a profile URL.
+            slug = author.get("public_identifier")
+            author_url = (
+                f"https://www.linkedin.com/in/{slug}" if slug
+                else author.get("public_profile_url") or author.get("profile_url") or ""
+            )
+            if not author_url:
+                continue
+            out.append(PostHit(
+                author=ProspectHit(
+                    linkedin_url=author_url,
+                    full_name=author.get("name"),
+                    headline=author.get("headline"),
+                    location=author.get("location"),
+                    provider_id=author.get("id"),
+                ),
+                post_text=(it.get("text") or "")[:2000],
+                post_url=it.get("share_url") or it.get("url"),
+                posted_at=it.get("date"),
             ))
         return out
 
