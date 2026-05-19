@@ -32,6 +32,7 @@ logger = logging.getLogger("linkedin.daily")
 class DailyResult:
     polled_messages: int = 0
     new_inbound: int = 0
+    accepts_detected: int = 0
     reactions_sent: int = 0
     connect_drafts: int = 0
     dm1_drafts: int = 0
@@ -46,6 +47,7 @@ class DailyResult:
     def summary(self) -> str:
         lines = [
             f"📥 polled: {self.polled_messages} (new: {self.new_inbound})",
+            f"✅ accepts detected: {self.accepts_detected}",
             f"❤️  reactions: {self.reactions_sent}",
             f"🤝 connect drafts: {self.connect_drafts}",
             f"📝 DM drafts: dm1={self.dm1_drafts} · dm2={self.dm2_drafts} · dm3={self.dm3_drafts}",
@@ -122,6 +124,23 @@ def run_daily(
         except Exception as e:
             logger.exception("poll failed")
             result.errors.append(f"poll: {e}")
+
+        # --- 2.5 check connection acceptances ----------------------------------
+        # Unipile's messages endpoint doesn't surface accept events, so we
+        # poll profile-distance for every `connection_sent` prospect. Anyone
+        # who is now 1st-degree accepted the invite — flip them to `connected`
+        # so step 5 (dm1) drafts a follow-up in the SAME run. Only runs when
+        # Unipile creds are configured; tests with fake adapter skip this.
+        if cfg.unipile_api_key and cfg.unipile_account_id and cfg.unipile_dsn:
+            try:
+                from .enrichment import check_acceptances
+                accept_result = check_acceptances(cfg)
+                result.accepts_detected = accept_result.detected
+                if accept_result.errors:
+                    result.errors.extend(accept_result.error_messages[:3])
+            except Exception as e:
+                logger.exception("acceptance check failed")
+                result.errors.append(f"check_accepts: {e}")
 
         # --- 3. react to recent posts of targeted prospects --------------------
         # Reactions are not window-gated. LIKEs are routine LinkedIn activity
@@ -258,6 +277,7 @@ def run_daily(
         db.log_action(
             None, "daily_completed",
             json.dumps({
+                "accepts_detected": result.accepts_detected,
                 "reactions": result.reactions_sent,
                 "connect_drafts": result.connect_drafts,
                 "dm1_drafts": result.dm1_drafts,

@@ -36,6 +36,15 @@ class EnrichResult:
     errors: list[str] = field(default_factory=list)
 
 
+@dataclass
+class CheckAcceptResult:
+    """Result of one acceptance-check pass over `connection_sent` prospects."""
+    detected: int = 0           # newly-detected accepts (moved to 'connected')
+    still_pending: int = 0      # invites still pending (not 1st-degree yet)
+    errors: int = 0             # profile-fetch failures
+    error_messages: list[str] = field(default_factory=list)
+
+
 # -------------------------------------------------------------- predicate
 
 def should_reenrich(prospect, *, now: datetime | None = None, staleness_days: int = DEFAULT_STALENESS_DAYS) -> bool:
@@ -162,6 +171,69 @@ def enrich(cfg: Config, prospect_id: int, *, client: _ProfileClient | None = Non
     finally:
         if own_client:
             client.close()
+
+
+# Network-distance values returned by Unipile when an invite is accepted.
+# Both forms appear in different account configurations; we accept either.
+_FIRST_DEGREE_VALUES = {"FIRST_DEGREE", "DISTANCE_1", "1", 1}
+
+
+def check_acceptances(
+    cfg: Config, *, limit: int | None = None,
+    client: _ProfileClient | None = None,
+) -> CheckAcceptResult:
+    """For each prospect in `connection_sent`, fetch their current profile and
+    check `network_distance`. If they're now 1st-degree, the invite was
+    accepted — move the prospect to `connected` so the DM1 step picks them up.
+
+    Important: this only TRANSITIONS status. It does not touch enrichment
+    fields (use `enrich` for that). One Unipile API call per pending invite.
+    Skips prospects with no provider_id (can't be looked up)."""
+    db.init_db()
+    result = CheckAcceptResult()
+
+    candidates = [
+        p for p in db.list_prospects(status="connection_sent", limit=10_000)
+        if p["provider_id"]
+    ]
+    if limit is not None:
+        candidates = candidates[:limit]
+
+    own_client = client is None
+    if own_client:
+        client = _ProfileClient(cfg)
+    try:
+        for p in candidates:
+            try:
+                profile = client.fetch_profile(p["provider_id"])
+                if profile is None:
+                    result.errors += 1
+                    result.error_messages.append(f"p={p['id']}: fetch returned None")
+                    continue
+                distance = profile.get("network_distance")
+                if distance in _FIRST_DEGREE_VALUES:
+                    db.set_status(int(p["id"]), "connected")
+                    db.log_action(
+                        int(p["id"]), "accept_detected",
+                        json.dumps({"prev_distance": p["network_distance"],
+                                    "current_distance": distance}),
+                        "ok", False,
+                    )
+                    result.detected += 1
+                    logger.info(
+                        "accept detected for prospect %d (%s)",
+                        p["id"], p["full_name"],
+                    )
+                else:
+                    result.still_pending += 1
+            except Exception as e:
+                logger.exception("acceptance check failed for prospect %d", p["id"])
+                result.errors += 1
+                result.error_messages.append(f"p={p['id']}: {e}")
+    finally:
+        if own_client:
+            client.close()
+    return result
 
 
 def enrich_stale(cfg: Config, *, staleness_days: int = DEFAULT_STALENESS_DAYS,

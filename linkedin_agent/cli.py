@@ -698,6 +698,31 @@ def enrich(prospect_id, all_stale, limit) -> None:
     console.print("[yellow]nothing to do — pass --prospect-id <N> or --all-stale[/yellow]")
 
 
+@cli.command("check-accepts")
+@click.option("--limit", default=None, type=int, help="Cap how many to check per run.")
+def check_accepts(limit: int | None) -> None:
+    """Check `connection_sent` prospects to see who has accepted the invite.
+
+    Without this, the system never notices acceptances (Unipile's messages
+    endpoint doesn't surface them). For each pending invite, fetches the
+    profile and checks `network_distance`; if 1st-degree, moves the prospect
+    to `connected` so the daily DM1 step drafts a follow-up.
+    """
+    from .enrichment import check_acceptances
+    cfg = load_config()
+    db.init_db()
+    result = check_acceptances(cfg, limit=limit)
+    console.print(
+        f"[green]✓[/green] checked {result.detected + result.still_pending} pending invites · "
+        f"[bold]{result.detected}[/bold] accepts detected · "
+        f"{result.still_pending} still pending · "
+        f"{result.errors} errors"
+    )
+    if result.error_messages:
+        for msg in result.error_messages[:5]:
+            console.print(f"  [red]✗[/red] {msg}")
+
+
 @cli.command()
 @click.option("--limit", default=50, help="Max messages to fetch per poll.")
 @click.option("--notify/--no-notify", default=True, help="Push Telegram notifications for new replies.")
