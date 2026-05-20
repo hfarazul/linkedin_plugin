@@ -176,7 +176,12 @@ class BotDaemon:
         reply_to = msg.get("reply_to_message") or {}
         reply_to_id = reply_to.get("message_id")
         if not reply_to_id or reply_to_id not in self._pending_edits:
-            # Not an edit reply — ignore. (Could be a /start or random message.)
+            # Not an edit reply — route to free-form conversational handler.
+            # /start and similar slash commands skip claude routing.
+            text = (msg.get("text") or "").strip()
+            if not text or text.startswith("/start") or text.startswith("/help"):
+                return
+            self._handle_conversational(text)
             return
 
         draft_id = self._pending_edits.pop(reply_to_id)
@@ -210,6 +215,47 @@ class BotDaemon:
             campaign_name=campaign_name,
         )
         db.set_draft_telegram_id(draft_id, new_msg_id)
+
+    # -------------------------------------------------------- conversational
+
+    def _handle_conversational(self, text: str) -> None:
+        """Route free-form text to Claude, post the response, audit log it.
+
+        Wrapped in defensive exception handling — the conversational layer
+        must never crash the daemon loop. Failures degrade to a Telegram
+        notification + log entry."""
+        from .conversational import handle_message
+        try:
+            result = handle_message(text, self.cfg)
+        except Exception as e:
+            logger.exception("conversational handler crashed")
+            try:
+                self.tg.notify_text(f"⚠️ Conversational handler error: {str(e)[:200]}")
+            except Exception:
+                pass
+            return
+
+        # Post reply to chat
+        try:
+            self.tg.notify_text(result.text)
+        except Exception as e:
+            logger.warning("failed to post conversational reply: %s", e)
+
+        # Audit log — prospect_id=None since this is a system-level interaction
+        try:
+            db.log_action(
+                None, "conversational",
+                json.dumps({
+                    "user_text": text[:500],
+                    "response_type": result.type,
+                    "response_text": result.text[:500],
+                    "error": result.error,
+                }),
+                "ok" if not result.error else "error",
+                False,
+            )
+        except Exception as e:
+            logger.warning("failed to write conversational audit log: %s", e)
 
     # -------------------------------------------------------- adapter send
 
