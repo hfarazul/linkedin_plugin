@@ -9,6 +9,8 @@
   Placeholders (replaced by install_launchd.sh):
     __PROJECT_DIR__   absolute path to the cloned repo
     __VENV_PYTHON__   absolute path to .venv/bin/python
+    __HOME__          $HOME — used to locate ~/.local/bin/claude on PATH
+    __USER__          $USER — needed by claude for macOS keychain access
 -->
 <plist version="1.0">
 <dict>
@@ -36,11 +38,18 @@
     <key>ThrottleInterval</key>
     <integer>10</integer>
 
-    <!-- Inherit standard paths so `claude -p` is found. -->
+    <!-- Inherit standard paths so `claude -p` is found.
+         claude binary typically lives at ~/.local/bin/claude (npm global),
+         which is NOT on launchd's default PATH. USER/LOGNAME needed for
+         keychain access (claude reads OAuth credentials via keychain). -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>USER</key>
+        <string>__USER__</string>
+        <key>LOGNAME</key>
+        <string>__USER__</string>
     </dict>
 
     <!-- Log everything to the repo's data/ folder so you can tail it. -->

@@ -41,6 +41,8 @@ mkdir -p "$PROJECT_DIR/data"
 sed \
     -e "s|__PROJECT_DIR__|$PROJECT_DIR|g" \
     -e "s|__VENV_PYTHON__|$VENV_PY|g" \
+    -e "s|__HOME__|$HOME|g" \
+    -e "s|__USER__|$(whoami)|g" \
     "$TEMPLATE" > "$TARGET"
 
 # Load it. With macOS 13+ launchctl wants bootstrap, but `load` still works.
