@@ -331,6 +331,64 @@ def test_draft_retries_on_spam_tell(monkeypatch, db_env):
     assert "spam-tell" in stub.calls[1].lower() or "i came across" in stub.calls[1].lower()
 
 
+# ===== OAuth warmup ========================================================
+
+@pytest.mark.unit
+def test_warmup_auth_returns_false_when_claude_missing(monkeypatch):
+    """No claude binary on PATH → warmup returns False, never raises."""
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    assert drafter.warmup_auth() is False
+
+
+@pytest.mark.unit
+def test_warmup_auth_returns_true_on_zero_exit(monkeypatch):
+    """`claude -p ok` exits 0 → warmup returns True (auth is hot)."""
+    import shutil
+    import subprocess
+
+    class _FakeProc:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    monkeypatch.setattr(shutil, "which", lambda name: "/fake/claude")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _FakeProc())
+    assert drafter.warmup_auth() is True
+
+
+@pytest.mark.unit
+def test_warmup_auth_returns_false_on_nonzero_exit(monkeypatch):
+    """`claude -p ok` exits 1 → warmup returns False but never raises.
+    This is the exact failure shape we're trying to defuse."""
+    import shutil
+    import subprocess
+
+    class _FakeProc:
+        returncode = 1
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(shutil, "which", lambda name: "/fake/claude")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _FakeProc())
+    assert drafter.warmup_auth() is False
+
+
+@pytest.mark.unit
+def test_warmup_auth_swallows_unexpected_exceptions(monkeypatch):
+    """Timeout, OSError, anything — warmup is best-effort. Never propagate."""
+    import shutil
+    import subprocess
+
+    def _raises(*args, **kwargs):
+        raise OSError("simulated subprocess error")
+
+    monkeypatch.setattr(shutil, "which", lambda name: "/fake/claude")
+    monkeypatch.setattr(subprocess, "run", _raises)
+    # Must not raise
+    assert drafter.warmup_auth() is False
+
+
 # ===== reply kind ===========================================================
 
 @pytest.mark.unit

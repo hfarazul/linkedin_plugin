@@ -72,11 +72,14 @@ def run_daily(
     notify_summary: bool = True,
 ) -> DailyResult:
     """Run the full daily cycle. All dependencies are injectable for tests."""
-    from .drafter import draft as default_drafter
+    from .drafter import draft as default_drafter, warmup_auth
     from .followup import run_followup_cycle
     from .poll import poll_once
     from .bot_daemon import send_draft_via_adapter
 
+    # Track whether the caller wants the real drafter — only that case needs
+    # OAuth warmup (tests pass a stub drafter that doesn't shell out).
+    using_default_drafter = drafter is None
     drafter = drafter or default_drafter
     result = DailyResult()
 
@@ -115,6 +118,15 @@ def run_daily(
             except Exception as e:
                 logger.warning("failed to sync campaign %s: %s", path, e)
                 result.errors.append(f"campaign sync {path.name}: {e}")
+
+        # --- 1.5 warm up claude OAuth before parallel drafter calls -----------
+        # When the OAuth credential refreshes during the cron run, parallel
+        # `claude -p` calls race on the refresh and some exit 1 with empty
+        # stderr (incident 2026-05-20: 4/4 dm1 drafts failed in that mode).
+        # A single trivial call here forces the refresh to complete BEFORE
+        # any drafter step. Best-effort — never blocks the cron.
+        if using_default_drafter:
+            warmup_auth()
 
         # --- 2. poll inbound replies -------------------------------------------
         try:

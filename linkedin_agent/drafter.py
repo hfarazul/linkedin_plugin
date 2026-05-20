@@ -220,6 +220,41 @@ def _invoke_claude(prompt: str, timeout: int = 90) -> str:
     return proc.stdout
 
 
+def warmup_auth(timeout: int = 20) -> bool:
+    """Single trivial `claude -p` call to serialize any pending OAuth refresh
+    before the drafter is hit in rapid succession. Returns True if the call
+    returned 0, False otherwise. Never raises — best-effort.
+
+    Why this exists: when the daily cron fires multiple drafter calls in
+    quick succession, an OAuth token mid-refresh causes some of them to fail
+    with `claude -p exited 1` (empty stderr). This warmup forces the token
+    refresh to complete BEFORE we make parallel drafter calls. Verified
+    against incident 2026-05-20 where 4/4 dm1 drafts failed at 12:31 UTC,
+    the same minute the credentials.json was rewritten. Cost: 1-3 seconds
+    on a hot start, ~5-15 seconds when refresh actually fires."""
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        # No claude binary on PATH — surfaces in tests + dev environments
+        # without Claude Code installed. Production cron always has it.
+        return False
+    try:
+        proc = subprocess.run(
+            [claude_bin, "-p", "ok", "--output-format", "text"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return False
+        return True
+    except Exception:
+        # Timeouts, OSError, anything — warmup is best-effort, never blocks
+        # the real cron run. The downstream drafter calls will surface real
+        # failures normally.
+        return False
+
+
 # -------------------------------------------------------------- output cleanup
 
 # Models sometimes wrap output in code fences despite instructions. Strip them.
