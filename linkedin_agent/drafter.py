@@ -202,7 +202,12 @@ def render_prompt(inp: DrafterInput, retry_hint: str | None = None) -> str:
 # -------------------------------------------------------------- claude invoker
 
 def _invoke_claude(prompt: str, timeout: int = 90) -> str:
-    """Run `claude -p` and return stdout. Separated for test stubbing."""
+    """Run `claude -p` and return stdout. Separated for test stubbing.
+
+    stdin is explicitly closed via DEVNULL. Without this, in non-TTY contexts
+    (cron, launchd) claude waits 3s for stdin then in some cases exits 1
+    with empty stderr — the exact "claude -p exited 1" failure mode we kept
+    hitting. Interactive shells dodge this because stdin is a TTY."""
     claude_bin = shutil.which("claude")
     if not claude_bin:
         raise DrafterError("`claude` binary not on PATH — is Claude Code installed?")
@@ -212,6 +217,7 @@ def _invoke_claude(prompt: str, timeout: int = 90) -> str:
         text=True,
         timeout=timeout,
         check=False,
+        stdin=subprocess.DEVNULL,
     )
     if proc.returncode != 0:
         raise DrafterError(
@@ -244,6 +250,7 @@ def warmup_auth(timeout: int = 20) -> bool:
             text=True,
             timeout=timeout,
             check=False,
+            stdin=subprocess.DEVNULL,
         )
         if proc.returncode != 0:
             return False

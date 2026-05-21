@@ -185,6 +185,7 @@ def _invoke_claude(prompt: str, timeout: int = _CLAUDE_TIMEOUT_SEC) -> str:
         proc = subprocess.run(
             [claude_bin, "-p", prompt, "--output-format", "text"],
             capture_output=True, text=True, timeout=timeout, check=False,
+            stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
         return json.dumps({
