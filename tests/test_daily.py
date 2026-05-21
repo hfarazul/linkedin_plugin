@@ -214,6 +214,43 @@ def test_daily_does_not_auto_skip_on_transient_drafter_failure(db_env, fake_tele
 
 
 @pytest.mark.integration
+def test_daily_trips_claude_breaker_after_threshold_failures(db_env, fake_telegram):
+    """When `claude -p exited 1` happens 3+ consecutive times, daily aborts
+    remaining drafter steps with one clean message — not 19 individual
+    errors. Verified against the 2026-05-21 cron-context incident where
+    every claude call fails (auth unavailable in launchd cron sandbox)."""
+    from linkedin_agent import db
+    from linkedin_agent.adapters import get_adapter
+    from linkedin_agent.drafter import DrafterError
+
+    # Seed 5 reacted prospects — all drafter calls will fail
+    for i in range(5):
+        _seed_prospect(
+            "reacted",
+            linkedin_url=f"https://www.linkedin.com/in/breaker-test-{i}",
+        )
+    cfg = _make_cfg()
+
+    def always_fails_drafter(kind, prospect_id, recent_posts=None):
+        raise DrafterError("claude -p exited 1\nstderr:\n")
+
+    adapter = get_adapter(cfg)
+    try:
+        result = daily_mod.run_daily(
+            cfg, adapter=adapter, telegram=fake_telegram,
+            drafter=always_fails_drafter,
+        )
+    finally:
+        adapter.close()
+
+    # 3 per-prospect errors + 1 breaker = 4 errors, not 5
+    assert len(result.errors) == 4, f"expected breaker after 3 fails, got {result.errors}"
+    # Last error is the clean breaker message
+    assert "draft steps aborted" in result.errors[-1].lower()
+    assert "claude unavailable" in result.errors[-1].lower()
+
+
+@pytest.mark.integration
 def test_daily_drafts_connect_for_reacted(db_env, fake_telegram):
     """reacted prospects get a connect_note draft → enqueued, pushed to fake Telegram."""
     from linkedin_agent import db

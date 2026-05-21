@@ -89,6 +89,13 @@ def run_daily(
     # step reuses it instead of re-hitting Unipile.
     posts_cache: dict[int, list] = {}
 
+    # Claude-unavailable circuit breaker. If the cron context can't reach
+    # claude (as observed on 2026-05-21 onwards), the first few drafter
+    # attempts fail; we then skip subsequent draft steps for this cycle
+    # rather than emitting one error per prospect.
+    consecutive_claude_failures = 0
+    claude_broken = False
+
     db.init_db()
 
     own_adapter = False
@@ -197,6 +204,8 @@ def run_daily(
         # specific to reference. Without posts the drafter returns
         # INSUFFICIENT_CONTEXT for most profiles.
         for p in db.list_prospects(status="reacted", limit=10_000):
+            if claude_broken:
+                break
             try:
                 safety.check_cap(cfg, "connect")
             except safety.RateLimitExceeded:
@@ -207,6 +216,7 @@ def run_daily(
             try:
                 body = drafter("connect_note", int(p["id"]),
                                recent_posts=_fetch_posts_for_draft(adapter, p, cache=posts_cache))
+                consecutive_claude_failures = 0  # success resets the breaker
             except Exception as e:
                 if _is_terminal_drafter_failure(e):
                     # Drafter explicitly told us this prospect can't be drafted
@@ -221,9 +231,30 @@ def run_daily(
                         "skipped", False,
                     )
                     logger.info("prospect %d marked skipped — drafter INSUFFICIENT_CONTEXT", p["id"])
+                    consecutive_claude_failures = 0
                 else:
+                    # All non-terminal failures: log the per-prospect error
+                    # so they stay visible in the summary. If they look like
+                    # the cron claude-unavailable pattern, also count toward
+                    # the breaker; on threshold, abort remaining drafter
+                    # steps cleanly with one extra summary line.
                     logger.warning("connect drafter failed for prospect %d: %s", p["id"], e)
                     result.errors.append(f"connect draft p={p['id']}: {e}")
+                    if _is_claude_unavailable_failure(e):
+                        consecutive_claude_failures += 1
+                        if consecutive_claude_failures >= _CLAUDE_FAILURE_BREAKER_THRESHOLD:
+                            claude_broken = True
+                            result.errors.append(
+                                f"draft steps aborted: claude unavailable in this context "
+                                f"({consecutive_claude_failures} consecutive `claude -p exited 1` "
+                                f"failures). Run `linkedin daily` interactively to recover."
+                            )
+                            logger.warning(
+                                "claude circuit breaker tripped at %d failures — "
+                                "skipping remaining drafter steps",
+                                consecutive_claude_failures,
+                            )
+                            break
                 continue
             did = db.enqueue_draft(int(p["id"]), "connect_note", body)
             _push_to_telegram(telegram, did, "connect_note", body, p)
@@ -231,6 +262,8 @@ def run_daily(
 
         # --- 5. dm1 drafts for connected prospects -----------------------------
         for p in db.list_prospects(status="connected", limit=10_000):
+            if claude_broken:
+                break
             if (p["dm_count"] or 0) > 0:
                 continue
             try:
@@ -243,23 +276,39 @@ def run_daily(
             try:
                 body = drafter("dm1", int(p["id"]),
                                recent_posts=_fetch_posts_for_draft(adapter, p))
+                consecutive_claude_failures = 0
             except Exception as e:
                 logger.warning("dm1 drafter failed for prospect %d: %s", p["id"], e)
                 result.errors.append(f"dm1 draft p={p['id']}: {e}")
+                if _is_claude_unavailable_failure(e):
+                    consecutive_claude_failures += 1
+                    if consecutive_claude_failures >= _CLAUDE_FAILURE_BREAKER_THRESHOLD:
+                        claude_broken = True
+                        result.errors.append(
+                            "draft steps aborted: claude unavailable in this context. "
+                            "Run `linkedin daily` interactively to recover."
+                        )
+                        logger.warning("claude circuit breaker tripped during dm1 step")
+                        break
                 continue
             did = db.enqueue_draft(int(p["id"]), "dm1", body)
             _push_to_telegram(telegram, did, "dm1", body, p)
             result.dm1_drafts += 1
 
         # --- 6. follow-ups (dm2/dm3) + auto-ghost ------------------------------
-        try:
-            f_result = run_followup_cycle(cfg, drafter=drafter, telegram=telegram)
-            result.dm2_drafts = f_result.dm2_enqueued
-            result.dm3_drafts = f_result.dm3_enqueued
-            result.ghosted = f_result.ghosted
-        except Exception as e:
-            logger.exception("followup failed")
-            result.errors.append(f"followup: {e}")
+        # Skip follow-up drafting if the circuit broke; auto-ghost still
+        # happens because it's a pure status-transition without drafter calls.
+        if claude_broken:
+            logger.info("skipping followup drafts — claude breaker tripped")
+        else:
+            try:
+                f_result = run_followup_cycle(cfg, drafter=drafter, telegram=telegram)
+                result.dm2_drafts = f_result.dm2_enqueued
+                result.dm3_drafts = f_result.dm3_enqueued
+                result.ghosted = f_result.ghosted
+            except Exception as e:
+                logger.exception("followup failed")
+                result.errors.append(f"followup: {e}")
 
         # --- 7. flush approved-but-not-sent queue if window is open ------------
         if send_window.is_open():
@@ -323,6 +372,24 @@ def _is_terminal_drafter_failure(exc: Exception) -> bool:
     INSUFFICIENT_CONTEXT marker is encoded in DrafterError's message by
     drafter.draft() — see drafter.py."""
     return "INSUFFICIENT_CONTEXT" in str(exc)
+
+
+def _is_claude_unavailable_failure(exc: Exception) -> bool:
+    """Detect the cron-spawn `claude -p exited 1` failure mode.
+
+    Verified 2026-05-21: when daily.py runs under launchd-managed cron, every
+    `claude -p` call exits 1 with empty stderr. The same script run from an
+    interactive shell with identical env works fine. We can't fully diagnose
+    the cron sandbox issue from inside the cron — so when we see this pattern,
+    we trip a circuit breaker and skip remaining drafter steps for the cycle
+    rather than emitting 19 identical errors to Telegram."""
+    return "exited 1" in str(exc)
+
+
+# After N consecutive `claude -p exited 1` failures in the same cycle, assume
+# we're in a bad cron context and stop firing more drafter calls. Three is
+# enough to distinguish a genuine pattern from a one-off transient hiccup.
+_CLAUDE_FAILURE_BREAKER_THRESHOLD = 3
 
 
 def _fetch_posts_for_draft(adapter, prospect, *, limit: int = 3, cache: dict | None = None) -> list[dict]:
