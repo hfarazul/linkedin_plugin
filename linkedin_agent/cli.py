@@ -214,6 +214,188 @@ def search_posts(keywords: str, limit: int, campaign: str | None,
         adapter.close()
 
 
+@cli.command("funding-import")
+@click.option("--company", required=True, help="Company name as it appears in Crunchbase News (e.g. 'Acme AI').")
+@click.option("--round", "round_type", default=None, help="Funding round (e.g. 'seed', 'pre-seed', 'Series A').")
+@click.option("--amount", default=None, help="Round size (e.g. '$2M', '$3.5M').")
+@click.option("--investors", default=None, help="Comma-separated investor names (e.g. 'Sequoia, a16z').")
+@click.option("--description", default=None, help="One-line product summary; helps the drafter pick a proof point.")
+@click.option("--campaign", default="recently-funded-non-tech", show_default=True,
+              help="Slug of the target campaign. Auto-synced from campaigns/<slug>.md if absent from DB.")
+@click.option("--dry-run", "dry_run", is_flag=True, default=False,
+              help="Preview the match without writing to the DB.")
+def funding_import(company: str, round_type: str | None, amount: str | None,
+                   investors: str | None, description: str | None,
+                   campaign: str, dry_run: bool) -> None:
+    """Import a recently-funded company's founder into a campaign.
+
+    Workflow: operator skims Crunchbase News, finds an interesting funding
+    event, runs this command. We search LinkedIn for the founder, score the
+    candidates strictly (threshold 20 — effectively requires the company name
+    in the headline), and import the top match into the campaign with the
+    funding details stashed in pitch_context.
+
+    Strict by design: a wrong-person import is far worse than a missed company.
+    """
+    from . import funding_lookup
+    cfg, adapter = _adapter()
+    try:
+        # --- Resolve campaign (auto-sync from markdown if not in DB yet) ----
+        campaign_row = db.get_campaign(campaign)
+        if not campaign_row:
+            try:
+                brief = campaigns_mod.load_brief(campaign)
+            except FileNotFoundError:
+                console.print(f"[red]no campaign brief at campaigns/{campaign}.md[/red]")
+                sys.exit(1)
+            cid = db.upsert_campaign(
+                slug=brief.slug, name=brief.name,
+                brief_path=str(brief.path), target_icp=brief.target_icp,
+            )
+            campaign_id = cid
+            console.print(f"[dim](auto-synced campaign {campaign!r} from brief)[/dim]")
+        else:
+            campaign_id = int(campaign_row["id"])
+
+        # --- Cap check + lookup ---------------------------------------------
+        try:
+            safety.check_cap(cfg, "search")
+        except safety.RateLimitExceeded as e:
+            console.print(f"[red]{e}[/red]")
+            sys.exit(1)
+
+        console.print(f"Searching LinkedIn for founder of {company!r}...")
+        match = funding_lookup.find_founder(adapter, company)
+
+        # The lookup consumes 1 unit of search budget — log a 'search' action
+        # so cap accounting stays accurate across funding-import + search calls.
+        if not dry_run:
+            db.log_action(
+                None, "search",
+                json.dumps({"funding_lookup": company}),
+                match.hit.linkedin_url if match else "",
+                False,
+            )
+
+        payload_base = {
+            "company": company,
+            "round": round_type,
+            "amount": amount,
+            "investors": investors,
+            "description": description,
+            "campaign": campaign,
+        }
+
+        # --- No candidates at all -------------------------------------------
+        if not match:
+            console.print(f"[red]✗[/red] No candidates found for company {company!r}.")
+            console.print("  Verify the spelling, or check the company exists on LinkedIn.")
+            if not dry_run:
+                db.log_action(
+                    None, "funding-import",
+                    json.dumps({**payload_base, "match_score": None,
+                                "match_signals": [], "result": "skipped_no_match"}),
+                    "", False,
+                )
+            sys.exit(1)
+
+        # --- Below threshold ------------------------------------------------
+        if match.score < funding_lookup.MIN_SCORE:
+            console.print(
+                f"[red]✗[/red] No confident founder match "
+                f"(top score {match.score}, threshold {funding_lookup.MIN_SCORE})."
+            )
+            console.print(
+                f"  Try a more specific name (e.g. 'Better Mortgage') "
+                f"or verify the company on LinkedIn manually."
+            )
+            if not dry_run:
+                db.log_action(
+                    None, "funding-import",
+                    json.dumps({**payload_base, "match_score": match.score,
+                                "match_signals": match.signals,
+                                "result": "skipped_no_match"}),
+                    match.hit.linkedin_url, False,
+                )
+            sys.exit(1)
+
+        # --- Match found — show it ------------------------------------------
+        console.print(
+            f"[green]✓[/green] Match (score {match.score}): "
+            f"[bold]{match.hit.full_name or '—'}[/bold]"
+        )
+        console.print(f"  Headline:  {match.hit.headline or '—'}")
+        console.print(f"  Location:  {match.hit.location or '—'}")
+        console.print(f"  URL:       {match.hit.linkedin_url}")
+        console.print(f"  Signals:   {'; '.join(match.signals) or '—'}")
+
+        # --- Cross-campaign dedup -------------------------------------------
+        existing = db.get_prospect_by_linkedin_url(match.hit.linkedin_url)
+        if existing and existing["campaign_id"] and int(existing["campaign_id"]) != campaign_id:
+            other = db.get_campaign(int(existing["campaign_id"]))
+            other_slug = other["slug"] if other else "?"
+            console.print()
+            console.print(
+                f"[yellow]⚠[/yellow] {match.hit.full_name} is already prospect "
+                f"#{existing['id']} in campaign [bold]{other_slug}[/bold] "
+                f"(status: {existing['status']})."
+            )
+            console.print("  Skipped — to move them, do it manually via SQL.")
+            if not dry_run:
+                db.log_action(
+                    existing["id"], "funding-import",
+                    json.dumps({**payload_base, "match_score": match.score,
+                                "match_signals": match.signals,
+                                "result": "skipped_dedup"}),
+                    match.hit.linkedin_url, False,
+                )
+            return
+
+        # --- Build pitch_context --------------------------------------------
+        pitch_context = funding_lookup.format_pitch_context(
+            company, round_type, amount, investors, description,
+        )
+
+        if dry_run:
+            console.print()
+            console.print("[dim](dry-run)[/dim] would import with pitch_context:")
+            console.print(f"  {pitch_context}")
+            return
+
+        # --- Import (or refresh same-campaign existing) ---------------------
+        pid = db.upsert_prospect(
+            linkedin_url=match.hit.linkedin_url,
+            full_name=match.hit.full_name,
+            headline=match.hit.headline,
+            location=match.hit.location,
+            campaign_id=campaign_id,
+            pitch_context=pitch_context,
+            provider_id=match.hit.provider_id,
+        )
+        # upsert_prospect uses COALESCE on pitch_context, which means
+        # re-imports keep the OLD value. For funding-import we want the
+        # fresher Crunchbase details to win, so overwrite explicitly when
+        # we know we hit an existing row.
+        if existing:
+            db.set_pitch_context(pid, pitch_context)
+
+        db.log_action(
+            pid, "funding-import",
+            json.dumps({**payload_base, "match_score": match.score,
+                        "match_signals": match.signals, "result": "imported"}),
+            match.hit.linkedin_url, False,
+        )
+
+        console.print()
+        console.print(
+            f"[green]✓[/green] Imported prospect #{pid} into campaign "
+            f"[bold]{campaign}[/bold]"
+        )
+        console.print(f"  pitch_context: {pitch_context}")
+    finally:
+        adapter.close()
+
+
 @cli.command()
 @click.argument("prospect_id", type=int)
 @click.option("--limit", default=3)

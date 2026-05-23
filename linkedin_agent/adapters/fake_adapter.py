@@ -3,6 +3,8 @@ from __future__ import annotations
 # Offline adapter for tests and dry-run smoke checks. Never touches the network.
 # Wire by setting LINKEDIN_BACKEND=fake in .env.
 
+import os
+
 from ..config import Config
 from .base import LinkedInAdapter, Post, PostHit, ProspectHit
 
@@ -17,11 +19,17 @@ class FakeAdapter(LinkedInAdapter):
 
     def search(self, query: str, limit: int = 20) -> list[ProspectHit]:
         self._record("search", query, limit=limit)
+        # Test hooks — let integration tests drive scenarios that the default
+        # query-echo headline can't naturally produce (e.g. funding-import's
+        # no-match path needs headlines that lack a founder/CEO keyword).
+        if os.environ.get("LINKEDIN_FAKE_EMPTY_SEARCH") == "1":
+            return []
+        headline_override = os.environ.get("LINKEDIN_FAKE_HEADLINE")
         return [
             ProspectHit(
                 linkedin_url=f"https://www.linkedin.com/in/fake-{i}-{query.replace(' ', '-').lower()}",
                 full_name=f"Fake Person {i}",
-                headline=f"Headline {i} matching {query}",
+                headline=headline_override or f"Headline {i} matching {query}",
                 company=f"Company {i}",
                 title="Founder",
                 location="Remote",

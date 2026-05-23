@@ -237,6 +237,24 @@ def get_prospect_by_provider_id(provider_id: str) -> sqlite3.Row | None:
         return cur.fetchone()
 
 
+def get_prospect_by_linkedin_url(linkedin_url: str) -> sqlite3.Row | None:
+    with connect() as conn:
+        cur = conn.execute("SELECT * FROM prospects WHERE linkedin_url = ?", (linkedin_url,))
+        return cur.fetchone()
+
+
+def set_pitch_context(prospect_id: int, pitch_context: str) -> None:
+    """Force-overwrite pitch_context. upsert_prospect uses COALESCE so it
+    won't replace an existing value; this is the explicit setter for callers
+    that want the new value to win (e.g. funding-import refreshing stale
+    funding details)."""
+    with connect() as conn:
+        conn.execute(
+            "UPDATE prospects SET pitch_context = ? WHERE id = ?",
+            (pitch_context, prospect_id),
+        )
+
+
 def set_status(prospect_id: int, status: str) -> None:
     if status not in VALID_STATUSES:
         raise ValueError(f"invalid status {status!r}; expected one of {VALID_STATUSES}")
