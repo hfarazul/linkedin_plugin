@@ -153,6 +153,12 @@ _PROSPECT_COLUMNS = {
     "pronoun":                   "TEXT",     # "She/Her", "He/Him", etc.
     "last_post_at":              "TEXT",     # ISO timestamp of most recent post
     "enriched_at":               "TEXT",     # when enrichment last ran
+    # When set, the prospect is in an outreach cooldown — typically because
+    # we withdrew a previous LinkedIn invitation and LinkedIn's anti-spam
+    # rules block re-inviting the same person for ~2-3 weeks. ISO timestamp;
+    # when current time >= this value, the prospect becomes eligible for
+    # re-drafting via the `cooldowns --revive-expired` flow.
+    "cooldown_until":            "TEXT",
 }
 
 _MESSAGE_COLUMNS = {
@@ -241,6 +247,45 @@ def get_prospect_by_linkedin_url(linkedin_url: str) -> sqlite3.Row | None:
     with connect() as conn:
         cur = conn.execute("SELECT * FROM prospects WHERE linkedin_url = ?", (linkedin_url,))
         return cur.fetchone()
+
+
+def set_cooldown(prospect_id: int, cooldown_until: str) -> None:
+    """Mark a prospect as in outreach cooldown until the given ISO timestamp."""
+    with connect() as conn:
+        conn.execute(
+            "UPDATE prospects SET cooldown_until = ? WHERE id = ?",
+            (cooldown_until, prospect_id),
+        )
+
+
+def clear_cooldown(prospect_id: int) -> None:
+    """Remove a prospect's cooldown (used when reviving for re-outreach)."""
+    with connect() as conn:
+        conn.execute(
+            "UPDATE prospects SET cooldown_until = NULL WHERE id = ?",
+            (prospect_id,),
+        )
+
+
+def list_cooldown_prospects(only_expired: bool = False) -> list[sqlite3.Row]:
+    """All prospects with a cooldown_until set. With only_expired=True,
+    returns just the ones whose cooldown has passed (eligible for revival)."""
+    with connect() as conn:
+        if only_expired:
+            cur = conn.execute(
+                """SELECT * FROM prospects
+                   WHERE cooldown_until IS NOT NULL
+                     AND cooldown_until <= ?
+                   ORDER BY cooldown_until""",
+                (now(),),
+            )
+        else:
+            cur = conn.execute(
+                """SELECT * FROM prospects
+                   WHERE cooldown_until IS NOT NULL
+                   ORDER BY cooldown_until""",
+            )
+        return list(cur.fetchall())
 
 
 def set_pitch_context(prospect_id: int, pitch_context: str) -> None:

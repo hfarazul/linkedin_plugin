@@ -667,6 +667,62 @@ def status() -> None:
 
 
 @cli.command()
+@click.option("--revive-expired", is_flag=True, default=False,
+              help="Flip cleared-cooldown prospects back to 'reacted' so the next daily run drafts a fresh connect note.")
+def cooldowns(revive_expired: bool) -> None:
+    """List prospects on outreach cooldown — typically because a previous
+    LinkedIn invitation was withdrawn and LinkedIn won't allow re-invitation
+    for ~2-3 weeks. Use `--revive-expired` to bring cleared ones back into
+    the draft queue.
+    """
+    from datetime import datetime, timezone
+    db.init_db()
+    rows = db.list_cooldown_prospects()
+    if not rows:
+        console.print("[dim]no prospects on cooldown[/dim]")
+        return
+
+    now_iso = datetime.now(timezone.utc)
+    t = Table(title=f"Cooldown queue ({len(rows)} prospects)")
+    for col in ("id", "name", "company", "cooldown_until", "days_left", "status"):
+        t.add_column(col)
+    for r in rows:
+        end = datetime.fromisoformat(r["cooldown_until"])
+        days = (end - now_iso).days
+        if days < 0:
+            days_str = f"[green]expired ({-days}d ago)[/green]"
+        else:
+            days_str = f"{days}d"
+        t.add_row(
+            str(r["id"]),
+            r["full_name"] or "—",
+            r["company"] or "—",
+            r["cooldown_until"][:10],
+            days_str,
+            r["status"],
+        )
+    console.print(t)
+
+    if revive_expired:
+        expired = db.list_cooldown_prospects(only_expired=True)
+        if not expired:
+            console.print("\n[dim]no expired cooldowns to revive[/dim]")
+            return
+        for r in expired:
+            db.clear_cooldown(int(r["id"]))
+            db.set_status(int(r["id"]), "reacted")
+            db.log_action(
+                int(r["id"]), "cooldown_revived",
+                None, "ready for re-draft", False,
+            )
+        console.print(
+            f"\n[green]✓[/green] revived {len(expired)} prospect(s) → "
+            f"status=[bold]reacted[/bold]. Next `linkedin daily` will draft "
+            f"a fresh connect note for each."
+        )
+
+
+@cli.command()
 def caps() -> None:
     """Show today's usage against the daily caps."""
     cfg = load_config()
