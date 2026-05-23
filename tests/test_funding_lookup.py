@@ -6,14 +6,12 @@ function or one branch in find_founder.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import pytest
 
 from linkedin_agent.adapters.base import LinkedInAdapter, Post, ProspectHit
 from linkedin_agent.funding_lookup import (
     MIN_SCORE,
-    FounderMatch,
+    _company_variants,
     _score_candidate,
     find_founder,
     format_pitch_context,
@@ -30,7 +28,7 @@ def _hit(headline: str, *, name: str = "Test Person",
 class _StubAdapter(LinkedInAdapter):
     """Minimal adapter that returns a canned list of hits and records the query."""
 
-    def __init__(self, hits: list[ProspectHit] | Exception):
+    def __init__(self, hits):
         self._hits = hits
         self.queries: list[str] = []
 
@@ -40,7 +38,6 @@ class _StubAdapter(LinkedInAdapter):
             raise self._hits
         return self._hits[:limit]
 
-    # Unused abstract methods for testing — return empty / raise.
     def get_recent_posts(self, linkedin_url: str, limit: int = 5) -> list[Post]:
         return []
 
@@ -54,84 +51,153 @@ class _StubAdapter(LinkedInAdapter):
         return ""
 
 
+# ----------------------------- company variants -----------------------------
+
+def test_company_variants_simple() -> None:
+    assert _company_variants("Cursor") == ["cursor"]
+
+
+def test_company_variants_multi_word_generates_hyphen_and_collapsed() -> None:
+    variants = _company_variants("Browser Use")
+    assert "browser use" in variants
+    assert "browser-use" in variants
+    assert "browseruse" in variants
+
+
+def test_company_variants_strips_ai_suffix() -> None:
+    variants = _company_variants("Bland AI")
+    assert "bland ai" in variants
+    assert "bland-ai" in variants
+    assert "bland" in variants
+
+
+def test_company_variants_skips_too_short() -> None:
+    # 1-2 char variants would create false-positive substring matches.
+    variants = _company_variants("AI")
+    assert "ai" not in variants
+
+
 # ----------------------------- scoring rules --------------------------------
 
-def test_score_candidate_strong_match() -> None:
+def test_score_strong_attribution() -> None:
+    # "CEO @ Acme AI" — single segment with founder/CEO + company.
+    # +20 (attribution) + 8 (CEO) = 28
     score, _ = _score_candidate(_hit("CEO @ Acme AI | building agentic accounting"), "Acme AI")
-    # company name (+20) + CEO (+8) = 28
-    assert score >= 28
+    assert score == 28
 
 
-def test_score_candidate_rejects_no_founder_role() -> None:
+def test_score_rejects_no_founder_keyword() -> None:
     score, signals = _score_candidate(_hit("Software Engineer @ Acme"), "Acme")
     assert score == -100
     assert "no founder/CEO keyword" in signals
 
 
-def test_score_candidate_penalizes_cto() -> None:
-    # CTO of Acme AI: founder/CEO check fails on "cto" alone — so this would
-    # actually be rejected outright (CTO doesn't contain "founder" or "ceo").
-    # But CTO + Founder in the headline: company (+20) + founder (+5) + tech (-15) = 10
+def test_score_penalizes_cto_in_attribution_segment() -> None:
+    # "Co-Founder & CTO @ Acme AI" — attribution segment fires (+20 +5);
+    # CTO penalty (-15) applies globally. Total: 10.
     score, signals = _score_candidate(
         _hit("Co-Founder & CTO @ Acme AI"), "Acme AI",
     )
     assert score == 10
     assert "tech role penalty" in signals
     assert "founder role" in signals
-    assert "company name in headline" in signals
 
 
-def test_score_candidate_rejects_investor() -> None:
-    # "Investor at Sequoia | Building Acme as side project" — has CEO/Founder? No.
-    # So it's rejected at the founder-keyword gate (-100), not by the
-    # investor penalty. The penalty path is for when someone is *both* a
-    # founder *and* an investor — rare but covered below.
-    score, signals = _score_candidate(
-        _hit("Investor at Sequoia | Building Acme as side project"),
-        "Acme",
-    )
+def test_score_rejects_pure_engineer() -> None:
+    # No founder keyword at all → hard reject.
+    score, _ = _score_candidate(_hit("Investor at Sequoia | Building Acme"), "Acme")
     assert score == -100
 
 
-def test_score_candidate_investor_with_founder_keyword_penalized() -> None:
-    # Founder of Acme AI but also "investor at" Sequoia in headline:
-    # company (+20) + founder (+5) - non-founder (-30) = -5
+def test_score_investor_attributed_to_other_co() -> None:
+    # "Founder of Acme AI | investor at Sequoia" — attribution segment fires
+    # for our company; global "investor at" penalty also fires.
+    # +20 +5 - 30 = -5
     score, signals = _score_candidate(
-        _hit("Founder of Acme AI | investor at Sequoia"),
-        "Acme AI",
+        _hit("Founder of Acme AI | investor at Sequoia"), "Acme AI",
     )
     assert score == -5
     assert "non-founder role penalty" in signals
     assert score < MIN_SCORE
 
 
-def test_score_candidate_no_company_in_headline() -> None:
-    # Founder, but company name absent — just +5 founder bonus.
-    score, _ = _score_candidate(_hit("Founder of stealth startup"), "Acme")
-    assert score == 5
+def test_score_no_attribution_when_company_not_in_founder_segment() -> None:
+    # "Lovable Ambassador | CEO at 10K Digital" — the Felipe Matos case.
+    # Lovable appears in one segment, CEO in another — no attribution.
+    # Also "ambassador" triggers the non-founder penalty.
+    # Score: 0 (no attribution) - 30 (ambassador) = -30
+    score, signals = _score_candidate(
+        _hit("CEO at 10K Digital | Lovable Ambassador"), "Lovable",
+    )
     assert score < MIN_SCORE
+    assert "non-founder role penalty" in signals
+    # The +20 attribution bonus must NOT fire.
+    assert not any("attributed" in s for s in signals)
+
+
+def test_score_no_attribution_when_company_mentioned_but_role_different() -> None:
+    # "We build AI-powered Notion workspaces | Founder & CEO 🪄" — Tem case.
+    # Notion appears in one segment, founder in another. No attribution.
+    score, signals = _score_candidate(
+        _hit("We build AI-powered Notion workspaces | Founder & CEO 🪄"),
+        "Notion",
+    )
+    assert score < MIN_SCORE
+    assert not any("attributed" in s for s in signals)
+
+
+def test_score_attribution_with_hyphen_variant() -> None:
+    # Magnus Müller case: company "Browser Use" but headline says "browser-use".
+    score, signals = _score_candidate(
+        _hit("Founder of browser-use (YC W25)"), "Browser Use",
+    )
+    assert score >= MIN_SCORE
+    assert any("attributed" in s for s in signals)
+
+
+def test_score_attribution_with_stripped_suffix() -> None:
+    # Isaiah Granet case: company "Bland AI" but headline says "@ Bland".
+    score, signals = _score_candidate(
+        _hit("Co Founder @ Bland"), "Bland AI",
+    )
+    assert score >= MIN_SCORE
+    assert any("attributed" in s for s in signals)
+
+
+def test_score_no_match_when_company_absent() -> None:
+    # Founder, but company name nowhere in headline.
+    score, signals = _score_candidate(_hit("Founder of stealth startup"), "Acme")
+    assert score == 0
+    assert score < MIN_SCORE
+    assert not any("attributed" in s for s in signals)
+
+
+def test_score_whole_word_match_avoids_substring_false_positive() -> None:
+    # "Better" should NOT match inside "betterment" (no word boundary).
+    score, _ = _score_candidate(
+        _hit("Founder of betterment platforms"), "Better",
+    )
+    assert score == 0  # no attribution
 
 
 # ----------------------------- find_founder ---------------------------------
 
 def test_find_founder_returns_top_match() -> None:
     adapter = _StubAdapter([
-        _hit("CTO @ Acme AI", name="Tech Guy"),               # score 10 (founder+company-tech)
-        _hit("CEO and Co-Founder @ Acme AI", name="Founder"),  # score 33 (founder+ceo+company)
-        _hit("Software Engineer at Acme AI", name="Eng"),     # rejected
-    ], )
+        _hit("CTO @ Acme AI", name="Tech Guy"),
+        _hit("CEO and Co-Founder @ Acme AI", name="Real Founder"),
+        _hit("Software Engineer at Acme AI", name="Eng"),
+    ])
     match = find_founder(adapter, "Acme AI")
     assert match is not None
-    assert match.hit.full_name == "Founder"
+    assert match.hit.full_name == "Real Founder"
     assert match.score >= MIN_SCORE
 
 
-def test_find_founder_returns_below_threshold_match_when_only_weak_candidates() -> None:
-    # find_founder returns the top non-rejected candidate; threshold check
-    # lives in the CLI so it can show the top score in the error message.
+def test_find_founder_returns_below_threshold_when_only_weak() -> None:
     adapter = _StubAdapter([
-        _hit("Founder of stealth startup"),  # score 5 — below threshold
-        _hit("CEO of unrelated thing"),      # score 8 — below threshold
+        _hit("Founder of stealth startup"),
+        _hit("CEO of unrelated thing"),
     ])
     match = find_founder(adapter, "Acme AI")
     assert match is not None
@@ -141,7 +207,7 @@ def test_find_founder_returns_below_threshold_match_when_only_weak_candidates() 
 def test_find_founder_returns_None_when_all_rejected() -> None:
     adapter = _StubAdapter([
         _hit("Software Engineer at Acme AI"),
-        _hit("Recruiter @ Acme AI"),  # no founder keyword
+        _hit("Talent acquisition @ Acme AI"),
     ])
     match = find_founder(adapter, "Acme AI")
     assert match is None
@@ -160,8 +226,6 @@ def test_find_founder_handles_search_exception() -> None:
 
 
 def test_find_founder_passes_company_in_query() -> None:
-    # The spec says the query is f'"{company}" founder' — phrase-search the
-    # company name so Unipile's classic search treats it as a unit.
     adapter = _StubAdapter([])
     find_founder(adapter, "Acme AI")
     assert adapter.queries == ['"Acme AI" founder']

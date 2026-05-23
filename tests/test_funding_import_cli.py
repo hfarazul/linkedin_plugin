@@ -291,7 +291,7 @@ def test_cli_logs_action_with_structured_payload(env: dict[str, str]) -> None:
     }
     assert isinstance(payload["match_score"], int)
     assert payload["match_score"] >= 20
-    assert "company name in headline" in payload["match_signals"]
+    assert any("attributed" in s for s in payload["match_signals"])
 
 
 def test_cli_respects_search_cap(env: dict[str, str]) -> None:
