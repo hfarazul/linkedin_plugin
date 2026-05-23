@@ -43,7 +43,7 @@ These hold regardless of which signal variant you're running.
 1. **Never re-invite a recently-withdrawn prospect.** LinkedIn enforces a ~2-3 week anti-spam cooldown — calls to `/users/invite` return `422 errors/already_invited_recently`. Bumping local caps does not help; the block is server-side. **If the user asks to withdraw + redraft, surface this BEFORE executing**. The 7 prospects currently in cooldown (run `linkedin cooldowns`) are the receipt for getting this wrong.
 2. **Default to `--dry-run` on the first scan of a new query batch.** Cheap preview before consuming Unipile budget on real imports.
 3. **One `funding-import` call ≈ 4 Unipile search units** (1 founder lookup + 3 team check). Budget accordingly; cap is 200/24h.
-4. **Pace burst calls.** Unipile throttles silently after ~25 rapid-fire searches — symptom is empty results across the board (not 4xx). Sleep 2s between calls in batch scripts; wait 60-180s if a burst trips the throttle.
+4. **Pace burst calls — and budget for the day-level limit.** Two throttle tiers: (a) Unipile-side burst throttle after ~25 rapid-fire searches, clears in 60-180s; (b) LinkedIn account-level people-search throttle after ~150-200 people-searches/day, clears in **6-24 hours** and only affects people-search (posts still work). Sleep 2s between calls AND cap total imports at ~25/day. See "Search throttling — two distinct tiers" section for diagnostics.
 5. **Withdraw is destructive.** Once an invitation is withdrawn, the recipient's pending-invite view loses it; we cannot retrieve. Confirm scope with the user before batch-withdrawing.
 
 ## Worked example: funding-events campaign
@@ -246,14 +246,46 @@ When the user asks to withdraw + redraft, **proactively warn about the cooldown*
 
 If a draft is awkward but already sent: prefer to leave it (most prospects don't re-read connection notes) or write a tighter DM1 to course-correct. Only withdraw if the message is actively damaging.
 
-### Unipile rate-limiting in bursts
+### Search throttling — two distinct tiers
 
-Running 25+ searches back-to-back (e.g. the dry-run loop) triggers a short-term throttle. Symptoms:
-- All subsequent searches return empty arrays (not 4xx — just no items)
-- Affects all queries equally, even basic `search("founder")` sanity checks
-- Clears after 60-180 seconds of idle
+There are **two separate throttling mechanisms** that both manifest as "search returns empty," and they require different responses. Distinguish by symptom:
 
-**Mitigation**: 2-second sleep between calls in batch scripts. If a batch's sends start failing with empty results, wait 3 minutes and retry.
+**Tier 1 — Unipile-side burst throttle** (the friendly one)
+- Triggered by 25+ rapid-fire searches in a 2-3 minute window
+- All searches return empty (`items: []`, `total_count: 0`)
+- Clears after **60-180 seconds of idle**
+- Affects people + posts + every query type equally
+- Mitigation: 2-second sleep between calls in batch scripts; wait 3 minutes if hit
+
+**Tier 2 — LinkedIn account-level people-search throttle** (the deep one)
+- Triggered by ~150-200+ people-searches in a day (the team-check fires 3 per import; this adds up fast across a campaign)
+- **Only affects `category=people` queries** — `category=posts` still works fine
+- Searches return `200 OK` with `total_count: 0` for ANY keyword (even "Anthropic", basic sanity terms — distinguishing this from Tier 1, which also returns 0 but clears quickly)
+- Clears in **6-24 hours** (LinkedIn's anti-abuse decay), not minutes
+- No 4xx code, no error body — just empty pages
+
+**How to differentiate when you see empty results:**
+
+```python
+# Quick diagnostic — run both endpoints
+people = adapter.search('founder', limit=3)
+posts  = adapter.search_posts('hiring', limit=3, date_posted='past_week')
+
+if not people and posts:
+    # Tier 2: account-level throttle on people-search.
+    # Wait until tomorrow. Post-search-based workflows still work.
+elif not people and not posts:
+    # Tier 1: burst throttle on everything.
+    # Wait 60-180s and retry.
+else:
+    # Working — proceed.
+```
+
+**Tier 2 workaround for active campaigns**: since `category=posts` still works, you can:
+- Use `linkedin search-posts` to find prospects via their actual content
+- Pre-saved candidate queues (collected during normal operation) can still be acted on tomorrow
+
+**To avoid tripping Tier 2**: limit total people-searches to ~100/day. Each funding-import or hiring-import costs 4 (1 founder + 3 team check), so cap at ~25 imports/day across both commands combined. The local `linkedin caps` counter only tracks logged actions, **not Tier 2 toward LinkedIn** — be careful.
 
 ### Company-name string match: common-word names
 
