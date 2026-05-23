@@ -411,3 +411,32 @@ def format_pitch_context(
     if description:
         base += f" — {description}"
     return base + "."
+
+
+def format_hiring_pitch_context(
+    company: str,
+    role: str | None,
+    posted: str | None,
+    description: str | None,
+) -> str:
+    """Build the pitch_context for a hiring-signal-sourced prospect — used by
+    `hiring-import` to give the drafter a concrete hook for the connect note.
+
+    Examples:
+      All fields:   "Hiring first engineer (posted today). Building Acme AI
+                     — AI-native accounting for SMBs."
+      Role + date:  "Hiring senior engineer (posted 3 days ago). Building
+                     Acme AI."
+      Role only:    "Hiring first engineer. Building Acme AI."
+      Just company: "Hiring engineering. Building Acme AI."
+    """
+    if role:
+        hiring_phrase = f"Hiring {role}"
+        if posted:
+            hiring_phrase += f" (posted {posted})"
+    else:
+        hiring_phrase = "Hiring engineering"
+    base = f"{hiring_phrase}. Building {company}"
+    if description:
+        base += f" — {description}"
+    return base + "."

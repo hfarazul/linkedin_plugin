@@ -16,6 +16,7 @@ from linkedin_agent.funding_lookup import (
     _score_candidate,
     check_team,
     find_founder,
+    format_hiring_pitch_context,
     format_pitch_context,
 )
 
@@ -277,6 +278,44 @@ def test_format_pitch_context_amount_only() -> None:
 def test_format_pitch_context_investors_no_round() -> None:
     out = format_pitch_context("Acme AI", None, None, "Sequoia", None)
     assert out == "Recently funded from Sequoia. Building Acme AI."
+
+
+# ----------------------------- format_hiring_pitch_context -----------------
+
+def test_format_hiring_pitch_context_full() -> None:
+    out = format_hiring_pitch_context(
+        "Acme AI", "first engineer", "today",
+        "AI-native accounting for SMBs",
+    )
+    assert out == (
+        "Hiring first engineer (posted today). "
+        "Building Acme AI — AI-native accounting for SMBs."
+    )
+
+
+def test_format_hiring_pitch_context_role_only() -> None:
+    out = format_hiring_pitch_context("Acme AI", "first engineer", None, None)
+    assert out == "Hiring first engineer. Building Acme AI."
+
+
+def test_format_hiring_pitch_context_minimal() -> None:
+    out = format_hiring_pitch_context("Acme AI", None, None, None)
+    assert out == "Hiring engineering. Building Acme AI."
+
+
+def test_format_hiring_pitch_context_posted_without_role_drops_posted() -> None:
+    # No role → can't say "Hiring X (posted Y)" coherently. The "(posted Y)"
+    # piece is anchored to the role; without a role we fall back to the
+    # generic phrase and drop the posted date silently.
+    out = format_hiring_pitch_context("Acme AI", None, "yesterday", None)
+    assert out == "Hiring engineering. Building Acme AI."
+
+
+def test_format_hiring_pitch_context_role_with_description() -> None:
+    out = format_hiring_pitch_context(
+        "Acme AI", "senior engineer", None, "B2B SaaS for retailers",
+    )
+    assert out == "Hiring senior engineer. Building Acme AI — B2B SaaS for retailers."
 
 
 # ----------------------------- _is_current_employee -------------------------
