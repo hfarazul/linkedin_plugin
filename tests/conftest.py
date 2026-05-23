@@ -44,6 +44,12 @@ def env(tmp_path: Path) -> dict[str, str]:
         "ACTION_DELAY_MIN": "0",
         "ACTION_DELAY_MAX": "0",
         "DRY_RUN": "0",
+        # funding-import runs a 3-query team check; FakeAdapter's default
+        # query-echo headlines would falsely trigger "has CTO" on those.
+        # Default to empty results for team-check queries so happy-path
+        # integration tests work. Tests that exercise the team-check
+        # disqualification explicitly remove this key.
+        "LINKEDIN_FAKE_EMPTY_TEAM_CHECK": "1",
         # Telegram creds not used in offline tests, but the config loader is fine
         # with them being absent. Tests that need a TelegramClient should
         # monkeypatch to a FakeTelegramClient anyway.

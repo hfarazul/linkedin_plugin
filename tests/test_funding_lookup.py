@@ -12,7 +12,9 @@ from linkedin_agent.adapters.base import LinkedInAdapter, Post, ProspectHit
 from linkedin_agent.funding_lookup import (
     MIN_SCORE,
     _company_variants,
+    _is_current_employee,
     _score_candidate,
+    check_team,
     find_founder,
     format_pitch_context,
 )
@@ -26,7 +28,15 @@ def _hit(headline: str, *, name: str = "Test Person",
 
 
 class _StubAdapter(LinkedInAdapter):
-    """Minimal adapter that returns a canned list of hits and records the query."""
+    """Minimal adapter that returns a canned list of hits and records the query.
+
+    `hits` can be:
+      - a list[ProspectHit]: same list returned for every search
+      - a dict[query_substr -> list[ProspectHit]]: returns the list whose key
+        is a substring of the query (lets team-check tests vary results per
+        sub-query — CTO vs engineer vs founding)
+      - an Exception: raises on every search
+    """
 
     def __init__(self, hits):
         self._hits = hits
@@ -36,6 +46,11 @@ class _StubAdapter(LinkedInAdapter):
         self.queries.append(query)
         if isinstance(self._hits, Exception):
             raise self._hits
+        if isinstance(self._hits, dict):
+            for key, hits in self._hits.items():
+                if key in query.lower():
+                    return hits[:limit]
+            return []
         return self._hits[:limit]
 
     def get_recent_posts(self, linkedin_url: str, limit: int = 5) -> list[Post]:
@@ -262,3 +277,137 @@ def test_format_pitch_context_amount_only() -> None:
 def test_format_pitch_context_investors_no_round() -> None:
     out = format_pitch_context("Acme AI", None, None, "Sequoia", None)
     assert out == "Recently funded from Sequoia. Building Acme AI."
+
+
+# ----------------------------- _is_current_employee -------------------------
+
+def test_current_employee_lead_position() -> None:
+    # Company in first segment, no past markers → current.
+    assert _is_current_employee("cofounder @ hardline | construction ops", ["hardline"])
+
+
+def test_current_employee_with_only_past_marker_after() -> None:
+    # Headline like "CEO at Acme | Previously: Stanford" — Acme is current
+    # (appears BEFORE the past marker).
+    assert _is_current_employee(
+        "ceo at acme | previously: stanford ms", ["acme"],
+    )
+
+
+def test_current_employee_company_after_past_marker() -> None:
+    # Zachary Crockett's case — Hardline is mentioned only in a "Previously"
+    # block. Must not be treated as current.
+    assert not _is_current_employee(
+        "sr. engineering manager at sofar ocean. previously: founder & cto at "
+        "particle and hardline",
+        ["hardline"],
+    )
+
+
+def test_current_employee_ex_prefix() -> None:
+    # "Ex-CTO at Acme" → past role.
+    assert not _is_current_employee("ex-cto at acme | building beta", ["acme"])
+
+
+def test_current_employee_company_absent() -> None:
+    assert not _is_current_employee("ceo at unrelated", ["acme"])
+
+
+# ----------------------------- check_team -----------------------------------
+
+def test_check_team_no_employees() -> None:
+    adapter = _StubAdapter([])
+    result = check_team(adapter, "Acme")
+    assert result.disqualification is None
+    assert result.cto_found is False
+    assert result.builder_engineers == []
+    assert result.employees_seen == 0
+
+
+def test_check_team_finds_cto_disqualifies() -> None:
+    adapter = _StubAdapter({
+        "cto": [_hit("Co-Founder & CTO @ Acme", name="Tech Cofounder")],
+        "engineer": [],
+        "founding": [],
+    })
+    result = check_team(adapter, "Acme")
+    assert result.disqualification is not None
+    assert "Tech Cofounder" in result.disqualification
+    assert result.cto_found is True
+
+
+def test_check_team_two_engineers_disqualifies() -> None:
+    adapter = _StubAdapter({
+        "engineer": [
+            _hit("Software Engineer @ Acme",
+                 name="Eng One", url="https://www.linkedin.com/in/e1"),
+            _hit("ML Engineer @ Acme",
+                 name="Eng Two", url="https://www.linkedin.com/in/e2"),
+        ],
+    })
+    result = check_team(adapter, "Acme")
+    assert result.disqualification is not None
+    assert "eng team (2" in result.disqualification
+
+
+def test_check_team_one_engineer_passes_with_warning() -> None:
+    adapter = _StubAdapter({
+        "engineer": [
+            _hit("Senior Engineer @ Acme",
+                 name="Sole Eng", url="https://www.linkedin.com/in/e1"),
+        ],
+    })
+    result = check_team(adapter, "Acme")
+    assert result.disqualification is None
+    assert result.builder_engineers == ["Sole Eng"]
+    assert result.employees_seen == 1
+
+
+def test_check_team_excludes_founder() -> None:
+    founder_url = "https://www.linkedin.com/in/founder"
+    adapter = _StubAdapter({
+        "engineer": [
+            _hit("Founder & CEO @ Acme | also engineer at heart",
+                 name="The Founder", url=founder_url),
+        ],
+    })
+    result = check_team(adapter, "Acme", founder_url=founder_url)
+    # Founder must not be double-counted as an employee.
+    assert result.employees_seen == 0
+    assert result.disqualification is None
+
+
+def test_check_team_past_employee_doesnt_count() -> None:
+    adapter = _StubAdapter({
+        "cto": [
+            _hit("Sr. Eng Manager at Other Co. Previously: Founder & CTO at Acme",
+                 name="Past CTO", url="https://www.linkedin.com/in/past"),
+        ],
+    })
+    result = check_team(adapter, "Acme")
+    assert result.disqualification is None
+    assert result.cto_found is False
+
+
+def test_check_team_sales_engineer_doesnt_count_as_builder() -> None:
+    adapter = _StubAdapter({
+        "engineer": [
+            _hit("Sales Engineer @ Acme | helping customers",
+                 name="Sales Eng", url="https://www.linkedin.com/in/sales"),
+            _hit("Customer Engineer @ Acme",
+                 name="CS Eng", url="https://www.linkedin.com/in/cs"),
+        ],
+    })
+    result = check_team(adapter, "Acme")
+    # 2 results seen but neither is a builder; no disqualification.
+    assert result.disqualification is None
+    assert result.builder_engineers == []
+    assert result.employees_seen == 2
+
+
+def test_check_team_search_exception_doesnt_propagate() -> None:
+    adapter = _StubAdapter(RuntimeError("network broke"))
+    # Should not raise — each sub-query failure swallowed.
+    result = check_team(adapter, "Acme")
+    assert result.disqualification is None
+    assert result.employees_seen == 0

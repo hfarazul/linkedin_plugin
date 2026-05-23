@@ -68,6 +68,37 @@ class FounderMatch:
     signals: list[str]
 
 
+# Headlines that signal someone is a builder engineer at the company.
+# "engineer" alone is too noisy (sales engineer, customer engineer, quality
+# engineer); we need the modifier to confirm builder-side.
+_BUILDER_ENG_PATTERNS = (
+    "software engineer", "senior engineer", "lead engineer",
+    "principal engineer", "staff engineer", "tech lead",
+    "ml engineer", "ai engineer", "data engineer", "devops engineer",
+    "full-stack", "fullstack", "full stack",
+    "backend", "frontend", "front-end", "back-end",
+    "founding engineer", "founding mle", "founding software",
+    # "engineering @ X" / "engineering at X" — usually means they're on the
+    # eng team in some capacity (Sr Manager Eng, IC, etc.).
+    "engineering @", "engineering at",
+)
+
+
+@dataclass
+class TeamCheckResult:
+    """Result of looking for an existing engineering team at the company.
+
+    The disqualification reason is non-None when the team check thinks the
+    company has too much eng capacity to need an agency. The CLI uses this
+    to skip the import with a clear reason logged.
+    """
+    cto_found: bool
+    cto_name: str | None
+    builder_engineers: list[str]   # names (display) of current builder engineers
+    employees_seen: int            # de-duplicated count of current employees that surfaced
+    disqualification: str | None
+
+
 def _company_variants(company: str) -> list[str]:
     """Build lowercase string variants of the company name to try when
     matching against a headline. Founders write company names in lots of
@@ -221,6 +252,138 @@ def find_founder(
 
     scored.sort(key=lambda m: m.score, reverse=True)
     return scored[0]
+
+
+_PAST_ROLE_MARKERS = (
+    "previously", "previous:", "ex-", "former ", "(former)",
+    "past:", "prev:", "last:", "ex ",
+)
+
+
+def _is_current_employee(headline_lower: str, company_variants: list[str]) -> bool:
+    """Heuristic: does this headline describe a CURRENT role at <company>?
+
+    LinkedIn headlines typically lead with the current role, with past roles
+    or side-projects pushed after a "|", "previously:", "ex-", etc.
+
+      ✓ "Cofounder @ Hardline | Construction has always run on verbal..."
+         — current: company in first segment, no past markers
+      ✗ "Sr. Engineering Manager at Sofar Ocean. Previously: Founder & CTO
+         at Particle and Hardline"
+         — past: company appears AFTER a 'previously' marker
+      ✗ "Ex-CTO at Acme | Building something new at Beta"
+         — past: company appears immediately after an 'ex-' marker
+    """
+    # If any past-role marker appears, check whether the company sits before
+    # or after it. Before → still counts (companies people lead with).
+    # After → past role, doesn't count.
+    past_marker_idx = -1
+    for marker in _PAST_ROLE_MARKERS:
+        idx = headline_lower.find(marker)
+        if idx >= 0 and (past_marker_idx == -1 or idx < past_marker_idx):
+            past_marker_idx = idx
+
+    # Find earliest variant match (any of them is enough).
+    company_idx = -1
+    for v in company_variants:
+        pattern = r"\b" + re.escape(v) + r"\b"
+        m = re.search(pattern, headline_lower)
+        if m and (company_idx == -1 or m.start() < company_idx):
+            company_idx = m.start()
+    if company_idx == -1:
+        return False
+
+    # No past marker: presence in headline is enough (founders + most others
+    # lead with their current role).
+    if past_marker_idx == -1:
+        return True
+    # Company appears BEFORE the past marker → current role.
+    return company_idx < past_marker_idx
+
+
+def check_team(
+    adapter: LinkedInAdapter,
+    company: str,
+    *,
+    founder_url: str | None = None,
+    limit_per_query: int = 10,
+) -> TeamCheckResult:
+    """Detect whether `company` already has an in-house engineering team.
+
+    The campaign brief for recently-funded-non-tech says explicitly "no
+    in-house engineering team yet" — but the founder-match step doesn't
+    verify that. So we run a few company-keyword searches and look at who
+    currently lists the company in their headline.
+
+    Disqualification rules:
+      - any current CTO / "chief technology officer" → ICP miss (the
+        non-tech founder already has an engineering counterpart)
+      - 2+ builder engineers (software/ML/founding eng) currently at the
+        company → has a team forming; agency pitch is weaker
+      - 1 lone engineer / "AI at X" / ambiguous → no disqualification,
+        but recorded so the operator can decide
+
+    Each query consumes one Unipile search call. We do 3 queries → 3 extra
+    search-budget units per funding-import. The cap-check upstream still
+    only counts the founder-lookup call (1 unit) so the budget hit is real.
+    """
+    company_variants = _company_variants(company)
+    if not company_variants:
+        return TeamCheckResult(
+            cto_found=False, cto_name=None,
+            builder_engineers=[], employees_seen=0, disqualification=None,
+        )
+
+    employees_by_url: dict[str, ProspectHit] = {}
+    for query in (
+        f'"{company}" CTO',
+        f'"{company}" engineer',
+        f'"{company}" "founding"',
+    ):
+        try:
+            hits = adapter.search(query, limit=limit_per_query)
+        except Exception:
+            # Best-effort — if a single sub-search fails (e.g. transient
+            # Unipile blip), skip it and rely on the others. Don't propagate
+            # since this would block legitimate imports.
+            continue
+        for h in hits:
+            if not h.linkedin_url:
+                continue
+            if founder_url and h.linkedin_url == founder_url:
+                continue
+            # Current-employee check: company must appear in the headline AND
+            # not after a "previously" / "ex-" past-role marker.
+            headline_lower = (h.headline or "").lower()
+            if not _is_current_employee(headline_lower, company_variants):
+                continue
+            employees_by_url[h.linkedin_url] = h
+
+    cto_name: str | None = None
+    builder_engineers: list[str] = []
+    for hit in employees_by_url.values():
+        hl = (hit.headline or "").lower()
+        # CTO check first — covers "Co-Founder & CTO" and "Chief Technology"
+        if " cto" in hl or hl.startswith("cto") or "chief technology" in hl:
+            cto_name = cto_name or hit.full_name
+            continue  # don't double-count CTO as a builder engineer
+        if any(p in hl for p in _BUILDER_ENG_PATTERNS):
+            if hit.full_name:
+                builder_engineers.append(hit.full_name)
+
+    disqualification: str | None = None
+    if cto_name:
+        disqualification = f"has CTO ({cto_name})"
+    elif len(builder_engineers) >= 2:
+        disqualification = f"has eng team ({len(builder_engineers)}: {', '.join(builder_engineers[:3])})"
+
+    return TeamCheckResult(
+        cto_found=cto_name is not None,
+        cto_name=cto_name,
+        builder_engineers=builder_engineers,
+        employees_seen=len(employees_by_url),
+        disqualification=disqualification,
+    )
 
 
 def format_pitch_context(

@@ -287,11 +287,42 @@ def test_cli_logs_action_with_structured_payload(env: dict[str, str]) -> None:
         "campaign": "recently-funded-non-tech",
         "match_score": payload["match_score"],  # any int — verified separately
         "match_signals": payload["match_signals"],
+        "team_check": payload["team_check"],
         "result": "imported",
     }
+    assert payload["team_check"]["cto_found"] is False
     assert isinstance(payload["match_score"], int)
     assert payload["match_score"] >= 20
     assert any("attributed" in s for s in payload["match_signals"])
+
+
+def test_cli_skips_when_team_check_finds_cto(env: dict[str, str]) -> None:
+    """When the team check surfaces a current CTO at the company, the import
+    is skipped with result=skipped_has_eng_team and no prospect row created.
+
+    We disable the test-mode empty-team-check shortcut so FakeAdapter's
+    query-echo headlines (which contain 'CTO' when the query does) flow
+    through and trigger the disqualification path naturally.
+    """
+    env_team = {k: v for k, v in env.items() if k != "LINKEDIN_FAKE_EMPTY_TEAM_CHECK"}
+    _run(["init"], env_team)
+    result = _run(
+        ["funding-import", "--company", "Acme AI"],
+        env_team,
+        expect_fail=True,
+    )
+    assert "ICP miss" in result.stdout
+    assert "CTO" in result.stdout
+
+    prospects = _db_query(env["LINKEDIN_DB_PATH"], "SELECT * FROM prospects")
+    assert len(prospects) == 0
+
+    actions = _db_query(env["LINKEDIN_DB_PATH"],
+                        "SELECT * FROM actions WHERE kind = 'funding-import'")
+    assert len(actions) == 1
+    payload = json.loads(actions[0]["payload"])
+    assert payload["result"] == "skipped_has_eng_team"
+    assert payload["team_check"]["cto_found"] is True
 
 
 def test_cli_respects_search_cap(env: dict[str, str]) -> None:

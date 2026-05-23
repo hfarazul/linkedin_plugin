@@ -4,9 +4,19 @@ from __future__ import annotations
 # Wire by setting LINKEDIN_BACKEND=fake in .env.
 
 import os
+import re
 
 from ..config import Config
 from .base import LinkedInAdapter, Post, PostHit, ProspectHit
+
+
+# Funding-import team check fires very specific queries:
+# '"<company>" CTO', '"<company>" engineer', '"<company>" "founding"'.
+# We match that shape exactly so we don't suppress legitimate user searches
+# like 'ai engineer' or 'startup CTO'.
+_TEAM_CHECK_QUERY_RE = re.compile(
+    r'^"[^"]+"\s+(cto|engineer|"founding")\s*$', re.IGNORECASE,
+)
 
 
 class FakeAdapter(LinkedInAdapter):
@@ -24,6 +34,14 @@ class FakeAdapter(LinkedInAdapter):
         # no-match path needs headlines that lack a founder/CEO keyword).
         if os.environ.get("LINKEDIN_FAKE_EMPTY_SEARCH") == "1":
             return []
+        # The funding-import team check fires sub-queries like '"X" CTO',
+        # '"X" engineer'. FakeAdapter's default query-echo headlines contain
+        # those words too, which would auto-trigger false disqualifications.
+        # Default-enabled in tests so happy-path imports work; opt-out by
+        # unsetting when a test wants to exercise the team check itself.
+        if os.environ.get("LINKEDIN_FAKE_EMPTY_TEAM_CHECK") == "1":
+            if _TEAM_CHECK_QUERY_RE.match(query):
+                return []
         headline_override = os.environ.get("LINKEDIN_FAKE_HEADLINE")
         return [
             ProspectHit(

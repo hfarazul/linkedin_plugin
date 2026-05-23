@@ -329,6 +329,43 @@ def funding_import(company: str, round_type: str | None, amount: str | None,
         console.print(f"  URL:       {match.hit.linkedin_url}")
         console.print(f"  Signals:   {'; '.join(match.signals) or '—'}")
 
+        # --- Team check: is there already an in-house eng team? -------------
+        # The campaign brief says "no in-house engineering team yet" — the
+        # founder match alone doesn't verify that. We look for current CTO /
+        # builder engineers at the company; if found, this is an ICP miss
+        # even though the funding event + non-tech founder both match.
+        team = funding_lookup.check_team(adapter, company, founder_url=match.hit.linkedin_url)
+        if team.disqualification:
+            console.print()
+            console.print(f"[yellow]⚠[/yellow] ICP miss — {team.disqualification}")
+            console.print(f"  ({team.employees_seen} current employee(s) seen across team-check queries)")
+            console.print("  Skipped — campaign targets companies without an in-house eng team.")
+            if not dry_run:
+                db.log_action(
+                    None, "funding-import",
+                    json.dumps({
+                        **payload_base,
+                        "match_score": match.score,
+                        "match_signals": match.signals,
+                        "team_check": {
+                            "cto_found": team.cto_found,
+                            "cto_name": team.cto_name,
+                            "builder_engineers": team.builder_engineers,
+                            "employees_seen": team.employees_seen,
+                        },
+                        "result": "skipped_has_eng_team",
+                    }),
+                    match.hit.linkedin_url, False,
+                )
+            sys.exit(1)
+        # Surface non-disqualifying findings so the operator sees them even
+        # when we proceed — a single "AI at X" hire is worth knowing about.
+        if team.employees_seen > 0:
+            note = f"{team.employees_seen} current employee(s) seen"
+            if team.builder_engineers:
+                note += f", {len(team.builder_engineers)} possibly-builder ({team.builder_engineers[0]})"
+            console.print(f"  Team:      {note} — proceeding")
+
         # --- Cross-campaign dedup -------------------------------------------
         existing = db.get_prospect_by_linkedin_url(match.hit.linkedin_url)
         if existing and existing["campaign_id"] and int(existing["campaign_id"]) != campaign_id:
@@ -381,8 +418,18 @@ def funding_import(company: str, round_type: str | None, amount: str | None,
 
         db.log_action(
             pid, "funding-import",
-            json.dumps({**payload_base, "match_score": match.score,
-                        "match_signals": match.signals, "result": "imported"}),
+            json.dumps({
+                **payload_base,
+                "match_score": match.score,
+                "match_signals": match.signals,
+                "team_check": {
+                    "cto_found": team.cto_found,
+                    "cto_name": team.cto_name,
+                    "builder_engineers": team.builder_engineers,
+                    "employees_seen": team.employees_seen,
+                },
+                "result": "imported",
+            }),
             match.hit.linkedin_url, False,
         )
 
