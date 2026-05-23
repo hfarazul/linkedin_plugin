@@ -127,9 +127,9 @@ def test_draft_returns_cleaned_body_on_success(monkeypatch, db_env):
         "Your recent post on shipping faster than the market hit a nerve. "
         "I'm at Cortivo — small AI-engineering studio with my co-founder Ritik "
         "(ex-Amazon SDE) and engineers from the IITs. We pair one senior eng "
-        "with AI tooling so non-tech founders ship v1 in 6-10 weeks instead of "
-        "hiring a team. Curious if you've tried that model, or if you're still "
-        "riding the in-house hiring path?"
+        "with AI tooling so you ship v1 in 6-10 weeks without hiring a team. "
+        "Curious if you've tried that model, or if you're still riding the "
+        "in-house hiring path?"
     )
     monkeypatch.setattr(
         drafter,
@@ -329,6 +329,66 @@ def test_draft_retries_on_spam_tell(monkeypatch, db_env):
     assert len(stub.calls) == 2
     # Retry prompt should mention the spam-tell phrases
     assert "spam-tell" in stub.calls[1].lower() or "i came across" in stub.calls[1].lower()
+
+
+# ===== audience-label post-validation =======================================
+
+@pytest.mark.unit
+@pytest.mark.parametrize("labeled_text,expected_phrase", [
+    # Real leaks observed in production drafts (Alena, Vincent, Emma)
+    ("Most non-tech founders hit the hire-vs-ship math right at this stage.",
+     "non-tech founder"),
+    ("That's the exact wedge we work in with freshly-funded non-tech founders.",
+     "non-tech founder"),
+    ("We help non-tech founders ship v1 in 6-10 weeks with one senior engineer.",
+     "non-tech founder"),
+    ("Non-technical founders often struggle at the build stage post-raise.",
+     "non-technical founder"),
+    ("Curious how you're approaching this as a first-time founder.",
+     "first-time founder"),
+    ("Most freshly-funded founders hit the same hiring slog.",
+     "freshly-funded founder"),
+])
+def test_contains_audience_label_detects_known_phrases(labeled_text, expected_phrase):
+    assert drafter._contains_audience_label(labeled_text) == expected_phrase
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("clean_text", [
+    # Real verified-good drafts — use "you" or specific situations, never labels
+    "Guy — the €2M close for NOX caught my eye. How are you thinking about the build side this quarter?",
+    "Curious how the build side is scaling against the broader-than-expected demand you mentioned.",
+    # Domain language that's NOT a segment label — must not false-positive
+    "Your fund's recent allocation thesis caught my eye.",
+    "The founder posted about scaling — worth comparing notes?",
+    # "founder" alone is fine; only the segment-modifier combinations trigger
+    "Founder at Cortivo — small AI-eng studio. Curious what you're building.",
+])
+def test_contains_audience_label_false_positives(clean_text):
+    """Real good-quality drafts must NOT trigger the audience-label filter."""
+    assert drafter._contains_audience_label(clean_text) is None
+
+
+@pytest.mark.unit
+def test_draft_retries_on_audience_label(monkeypatch, db_env):
+    """Drafter detects audience-segment language and retries with a hint."""
+    from linkedin_agent import db
+    pid = db.upsert_prospect("https://www.linkedin.com/in/test", full_name="Test User")
+
+    labeled = ("Your post on the patent platform stood out. We help non-tech "
+               "founders ship v1 in 6-10 weeks. Curious what you're working on. "
+               + "X" * 60)
+    clean = ("Your post on the patent platform stood out. We pair one senior "
+             "engineer with AI tooling so you ship v1 fast. " + "X" * 80)
+    stub = _StubInvoker([labeled, clean])
+    monkeypatch.setattr(drafter, "_invoke_claude", stub)
+
+    result = drafter.draft("connect_note", pid)
+    assert result == clean
+    assert len(stub.calls) == 2
+    # Retry prompt should reference the violation
+    retry_prompt = stub.calls[1].lower()
+    assert "audience" in retry_prompt or "non-tech founder" in retry_prompt
 
 
 # ===== OAuth warmup ========================================================

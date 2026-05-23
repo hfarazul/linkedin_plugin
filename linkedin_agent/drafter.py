@@ -94,6 +94,37 @@ def _contains_spam_tell(body: str) -> str | None:
     return None
 
 
+# Audience-segment labels — phrases the campaign brief uses internally to
+# describe WHO we target, which the drafter would occasionally parrot back
+# at the prospect ("we help non-tech founders ship v1..."). Reading a message
+# that names your category screams marketing-copy and breaks the peer-to-peer
+# tone the connect note depends on.
+#
+# Matched the same way as SPAM_TELLS — case-insensitive substring against the
+# full body. Keep the list narrow so legitimate domain language (e.g. a
+# prospect whose actual title is "Fund Manager") doesn't trigger false
+# positives.
+AUDIENCE_LABELS = (
+    "non-tech founder",        # catches both "founder" and "founders"
+    "non tech founder",
+    "non-technical founder",
+    "non technical founder",
+    "first-time founder",
+    "first time founder",
+    "freshly-funded founder",
+    "freshly funded founder",
+)
+
+
+def _contains_audience_label(body: str) -> str | None:
+    """Return the matched audience-label phrase, or None if clean."""
+    low = body.lower()
+    for phrase in AUDIENCE_LABELS:
+        if phrase in low:
+            return phrase
+    return None
+
+
 @dataclass
 class DrafterInput:
     kind: str
@@ -353,6 +384,22 @@ def draft(
                 f"any variant of: 'I came across', 'I noticed you', 'I saw "
                 f"your profile', 'I'd love to chat/connect', 'hope you're "
                 f"doing well'. Start with a specific reference instead."
+            )
+            continue
+
+        # Audience-label scan: the campaign brief uses segment-language like
+        # "non-tech founder" internally, and the model occasionally echoes it
+        # back at the prospect. That reads as marketing copy. Reject + retry.
+        label = _contains_audience_label(body)
+        if label:
+            last_failure = f"audience label {label!r} (attempt {attempt})"
+            last_body_preview = body
+            retry_hint = (
+                f"Your previous attempt used the audience-segment phrase "
+                f"{label!r}. Hard rule #8: never label the prospect by their "
+                f"category. Rewrite using 'you' / 'your team' or refer to the "
+                f"specific situation ('the post-raise hire-vs-ship math', "
+                f"'no in-house engineering team yet') — not the segment name."
             )
             continue
 
