@@ -197,6 +197,41 @@ def test_caps_reflects_usage(env: dict[str, str]) -> None:
     assert "2" in result.stdout and "30" in result.stdout
 
 
+def test_cooldowns_lists_and_revives(env: dict[str, str]) -> None:
+    """Cooldowns CLI lists prospects with a cooldown_until set; --revive-expired
+    flips the cleared ones back to 'reacted' so daily can re-draft them."""
+    from datetime import datetime, timedelta, timezone
+    _run(["init"], env)
+    _run(["search", "founder", "--limit", "2"], env)
+    # Two prospects exist now (ids 1, 2). Put one in active cooldown, one expired.
+    import sqlite3
+    future = (datetime.now(timezone.utc) + timedelta(days=20)).isoformat()
+    past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    conn = sqlite3.connect(env["LINKEDIN_DB_PATH"])
+    conn.execute("UPDATE prospects SET cooldown_until = ?, status = 'connection_sent' WHERE id = 1", (future,))
+    conn.execute("UPDATE prospects SET cooldown_until = ?, status = 'connection_sent' WHERE id = 2", (past,))
+    conn.commit()
+    conn.close()
+
+    # Listing shows both
+    result = _run(["cooldowns"], env)
+    assert "Fake Person 1" in result.stdout
+    assert "Fake Person 2" in result.stdout
+    assert "expired" in result.stdout  # for prospect 2
+
+    # Revive-expired: only prospect 2 flips back; prospect 1 still in cooldown
+    result = _run(["cooldowns", "--revive-expired"], env)
+    assert "revived 1 prospect" in result.stdout
+
+    rows = _db_query(env["LINKEDIN_DB_PATH"],
+                     "SELECT id, status, cooldown_until FROM prospects ORDER BY id")
+    by_id = {r["id"]: r for r in rows}
+    assert by_id[1]["status"] == "connection_sent"          # untouched (future cooldown)
+    assert by_id[1]["cooldown_until"] is not None
+    assert by_id[2]["status"] == "reacted"                  # revived
+    assert by_id[2]["cooldown_until"] is None
+
+
 def test_caps_blocks_when_exceeded(env: dict[str, str]) -> None:
     env = {**env, "DAILY_MAX_REACTIONS": "1"}
     _run(["init"], env)
