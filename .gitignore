@@ -2,6 +2,10 @@
 .env.local
 data/*.db
 data/*.db-journal
+# Daemon logs. These carried a live Telegram bot token (embedded in every
+# Telegram API URL) into git history — never track them.
+data/*.log
+*.log
 __pycache__/
 *.pyc
 .venv/
