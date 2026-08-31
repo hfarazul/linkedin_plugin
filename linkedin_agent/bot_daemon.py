@@ -23,7 +23,7 @@ from typing import Optional
 from . import db, safety, send_window
 from .adapters import get_adapter
 from .config import Config, load as load_config
-from .telegram import TelegramClient, TelegramError
+from .telegram import TelegramClient, TelegramError, install_log_redaction
 
 logger = logging.getLogger("linkedin.bot")
 
@@ -321,6 +321,10 @@ def send_draft_via_adapter(cfg: Config, adapter, draft, *, source: str = "cli") 
 
 def run() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # Install before anything can emit a request log — INFO-level httpx logging
+    # would otherwise write the bot token (embedded in every Telegram API URL)
+    # to data/bot-daemon.err.log on every poll.
+    install_log_redaction()
     cfg = load_config()
     db.init_db()
     daemon = BotDaemon(cfg)
