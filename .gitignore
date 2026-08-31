@@ -6,6 +6,10 @@ data/*.db-journal
 # Telegram API URL) into git history — never track them.
 data/*.log
 *.log
+# Raw Unipile profile responses from scripts/probe_unipile_experience.py.
+# Real people's profile data; this repository is public. Keep bodies local and
+# commit only the values-free schema summary.
+data/probe/
 __pycache__/
 *.pyc
 .venv/
