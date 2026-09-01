@@ -91,17 +91,58 @@ def _identifiers_from_db(limit: int) -> list[str]:
     return [r["provider_id"] for r in rows]
 
 
-def _fetch(client: httpx.Client, cfg, identifier: str, sections) -> tuple[int, dict | str]:
+def _scrub(text: str, cfg) -> str:
+    """Remove credential values from anything we print or write to disk.
+
+    Unipile authenticates with a header, so responses should never echo the
+    key — but "should never" is not a guarantee worth betting a public repo on,
+    and error bodies sometimes reflect request context back.
+    """
+    for secret in (cfg.unipile_api_key, cfg.unipile_account_id):
+        if secret and len(secret) >= 8:
+            text = text.replace(secret, "<redacted>")
+    return text
+
+
+def _fetch(client: httpx.Client, cfg, identifier: str, sections) -> tuple[int | str, dict | str]:
+    """Returns (status, payload). Status is an int for an HTTP response, or a
+    short string tag for a transport failure so the caller can explain it
+    rather than dying with a traceback."""
     params: dict = {"account_id": cfg.unipile_account_id}
     if sections:
         params["with_sections"] = sections
-    r = client.get(f"/users/{identifier}", params=params)
+    try:
+        r = client.get(f"/users/{identifier}", params=params)
+    except httpx.ConnectError as e:
+        return "CONNECT_ERROR", _scrub(str(e), cfg)[:200]
+    except httpx.TimeoutException:
+        return "TIMEOUT", "request timed out after 30s"
+    except httpx.HTTPError as e:
+        return "HTTP_ERROR", f"{type(e).__name__}: {_scrub(str(e), cfg)[:200]}"
     if r.status_code != 200:
-        return r.status_code, r.text[:400]
+        return r.status_code, _scrub(r.text, cfg)[:400]
     try:
         return 200, r.json()
     except Exception:
-        return 200, r.text[:400]
+        return 200, _scrub(r.text, cfg)[:400]
+
+
+def _explain_failure(status, detail: str) -> list[str]:
+    """Turn a failed fetch into something actionable rather than a bare code."""
+    if status == "CONNECT_ERROR":
+        return ["  Could not reach the host. Check UNIPILE_DSN is your real DSN",
+                "  (from the Unipile dashboard), not the .env.example placeholder."]
+    if status == "TIMEOUT":
+        return ["  Timed out. Network issue, or the DSN points somewhere unreachable."]
+    if status == 401 or status == 403:
+        return ["  Rejected. UNIPILE_API_KEY is wrong, expired, or not valid for this DSN."]
+    if status == 404:
+        return ["  Not found. Either the identifier is wrong, or UNIPILE_ACCOUNT_ID",
+                "  does not match a connected LinkedIn account."]
+    if status == 429:
+        return ["  Rate limited. Wait and retry; see the throttle notes in",
+                "  .claude/skills/news-signal-outreach.md."]
+    return [f"  Unexpected status {status}: {detail[:160]}"]
 
 
 def _find_positions(payload: dict) -> tuple[str | None, list]:
@@ -150,16 +191,42 @@ def main() -> int:
                     help="pull N provider_ids from the prospects table")
     ap.add_argument("--api-version", default="v1",
                     help="Unipile API version path segment (default: v1, what the code uses)")
+    ap.add_argument("--check-config", action="store_true",
+                    help="Validate credentials and exit without calling the API.")
     args = ap.parse_args()
 
     cfg = load_config()
-    missing = [n for n, v in (("UNIPILE_API_KEY", cfg.unipile_api_key),
-                              ("UNIPILE_ACCOUNT_ID", cfg.unipile_account_id),
-                              ("UNIPILE_DSN", cfg.unipile_dsn)) if not v]
-    if missing:
-        print(f"BLOCKED: missing credentials in .env: {', '.join(missing)}")
-        print("Run this on the host that has real Unipile credentials.")
+
+    # --- preflight: config must be real before anything else is worth trying --
+    problems: list[str] = []
+    for name, value in (("UNIPILE_API_KEY", cfg.unipile_api_key),
+                        ("UNIPILE_ACCOUNT_ID", cfg.unipile_account_id),
+                        ("UNIPILE_DSN", cfg.unipile_dsn)):
+        if not value:
+            problems.append(f"{name} is empty")
+    # .env.example ships a placeholder DSN; an unedited copy fails confusingly
+    # (DNS error) rather than obviously, so name it explicitly.
+    if cfg.unipile_dsn and "13xxx" in cfg.unipile_dsn:
+        problems.append(f"UNIPILE_DSN is still the .env.example placeholder ({cfg.unipile_dsn})")
+
+    print("Unipile config:")
+    print(f"  UNIPILE_API_KEY     {'set (' + str(len(cfg.unipile_api_key)) + ' chars)' if cfg.unipile_api_key else 'EMPTY'}")
+    print(f"  UNIPILE_ACCOUNT_ID  {'set (' + str(len(cfg.unipile_account_id)) + ' chars)' if cfg.unipile_account_id else 'EMPTY'}")
+    print(f"  UNIPILE_DSN         {cfg.unipile_dsn or 'EMPTY'}")
+
+    if problems:
+        print("\nBLOCKED - configuration incomplete:")
+        for p in problems:
+            print(f"  - {p}")
+        print("\nP0-1 cannot be answered without live Unipile access.")
+        print("Fill these in .env (values from the Unipile dashboard), then re-run.")
+        print("Do not paste credentials into chat - .env is gitignored.")
         return 2
+
+    if args.check_config:
+        print("\nConfig looks complete. Re-run without --check-config and with at")
+        print("least one identifier to probe actual profile responses.")
+        return 0
 
     identifiers = list(args.identifiers)
     if args.from_db:
@@ -181,12 +248,16 @@ def main() -> int:
             for variant, sections in SECTION_VARIANTS.items():
                 status, payload = _fetch(client, cfg, ident, sections)
                 if status != 200:
-                    print(f"  {variant:11s} HTTP {status}: {str(payload)[:120]}")
+                    print(f"  {variant:11s} FAILED ({status})")
+                    for line in _explain_failure(status, str(payload)):
+                        print(line)
                     continue
                 bodies[variant] = payload
                 path = OUT_DIR / f"profile_{n}_{variant}.json"
-                path.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
-                                encoding="utf-8")
+                # Scrub before writing: these files are diagnostic output the
+                # operator may well paste somewhere.
+                body_text = _scrub(json.dumps(payload, indent=2, ensure_ascii=False), cfg)
+                path.write_text(body_text, encoding="utf-8")
                 if isinstance(payload, dict):
                     print(f"  {variant:11s} HTTP 200, {len(payload)} top-level keys -> {path.name}")
 
@@ -242,22 +313,44 @@ def main() -> int:
     for v in verdicts:
         print(f"  {v['id']:20s} {v['verdict']}")
 
-    usable = sum(1 for v in verdicts if v["verdict"] == "USABLE")
     total = len(verdicts)
-    print(f"\n  {usable}/{total} profiles returned positions with a start date")
-    if total and usable == total:
+    usable = sum(1 for v in verdicts if v["verdict"] == "USABLE")
+    # A request that never reached the API says nothing about what the API can
+    # return. Counting transport failures as "no dated history" would
+    # manufacture evidence for PhantomBuster out of a bad DSN, so answered and
+    # unanswered profiles are kept strictly separate.
+    fetch_failed = sum(1 for v in verdicts if v["verdict"] == "FETCH_FAILED")
+    answered = total - fetch_failed
+
+    print(f"\n  {usable}/{answered} answered profiles returned positions with a start date")
+    if fetch_failed:
+        print(f"  {fetch_failed}/{total} profiles could not be fetched at all")
+
+    (OUT_DIR / "verdict.json").write_text(
+        _scrub(json.dumps(verdicts, indent=2), cfg), encoding="utf-8")
+
+    if answered == 0:
+        print("\n  VERDICT: UNVERIFIED - LIVE UNIPILE RESPONSE REQUIRED")
+        print("  Every request failed before reaching the API, so this run is")
+        print("  evidence about connectivity, NOT about Unipile's capability.")
+        print("  Fix the errors above and re-run. Do not treat this as a reason")
+        print("  to build PhantomBuster.")
+        print(f"\n  Raw bodies + verdict: {OUT_DIR}  (gitignored -- personal data)")
+        return 1
+
+    if usable == answered:
         print("\n  VERDICT: Unipile is sufficient. Skip PhantomBuster for the MVP.")
         print("  Next: P1-2 (positions table + mapper) using the field map above.")
     elif usable:
         print("\n  VERDICT: PARTIAL. Usable for some profiles only.")
         print("  Decide whether coverage is good enough before considering Phase 2.")
     else:
-        print("\n  VERDICT: Unipile does NOT provide dated history on this account/version.")
+        print("\n  VERDICT: Unipile returned profiles but NO dated history")
+        print("  on this account/API version.")
         print("  Before building PhantomBuster, retry with --api-version v2;")
         print("  a v1/v2 difference is far cheaper to resolve than a new vendor.")
 
-    (OUT_DIR / "verdict.json").write_text(json.dumps(verdicts, indent=2), encoding="utf-8")
-    print(f"\n  Raw bodies + verdict: {OUT_DIR}  (gitignored -- contains personal data)")
+    print(f"\n  Raw bodies + verdict: {OUT_DIR}  (gitignored -- personal data)")
     return 0
 
 
