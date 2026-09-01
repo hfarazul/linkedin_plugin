@@ -45,12 +45,21 @@ from linkedin_agent.config import load as load_config  # noqa: E402
 
 OUT_DIR = ROOT / "data" / "probe"
 
-# Section names from Unipile's v2 documentation. v1 may ignore these entirely
-# -- determining that is one of this probe's jobs.
+# Section request variants.
+#
+# The parameter name matters and is easy to get wrong: Unipile's marketing
+# pages say `with_sections=linkedin_experience`, but the API reference for
+# GET /users/{identifier} says `linkedin_sections=experience`. An unknown
+# query parameter is silently ignored rather than rejected, so the wrong
+# spelling produces a response identical to the baseline -- which reads as
+# "this API cannot return experience" when it actually means "you asked
+# wrongly". `with_sections` is kept below purely as a control: seeing it match
+# baseline while `linkedin_sections` differs is what proves the distinction.
 SECTION_VARIANTS = {
-    "baseline":   None,
-    "experience": ["linkedin_experience"],
-    "full":       ["linkedin_*_preview", "linkedin_experience", "linkedin_skills"],
+    "baseline":          {},
+    "with_sections":     {"with_sections": ["linkedin_experience"]},
+    "linkedin_sections": {"linkedin_sections": ["experience"]},
+    "sections_all":      {"linkedin_sections": ["*"]},
 }
 
 # The six fields the `positions` table needs (plan section 5). Each entry is a
@@ -66,8 +75,10 @@ REQUIRED_FIELDS = {
 
 
 def _client(cfg, api_version: str) -> httpx.Client:
+    # v1 lives under /api/v1; v2 is served from /v2 with no /api prefix.
+    prefix = "/api/v1" if api_version == "v1" else f"/{api_version}"
     return httpx.Client(
-        base_url=f"https://{cfg.unipile_dsn}/api/{api_version}",
+        base_url=f"https://{cfg.unipile_dsn}{prefix}",
         headers={"X-API-KEY": cfg.unipile_api_key, "accept": "application/json"},
         timeout=30.0,
     )
@@ -104,15 +115,22 @@ def _scrub(text: str, cfg) -> str:
     return text
 
 
-def _fetch(client: httpx.Client, cfg, identifier: str, sections) -> tuple[int | str, dict | str]:
+def _fetch(client: httpx.Client, cfg, identifier: str, sections: dict,
+           api_version: str = "v1") -> tuple[int | str, dict | str]:
     """Returns (status, payload). Status is an int for an HTTP response, or a
     short string tag for a transport failure so the caller can explain it
-    rather than dying with a traceback."""
-    params: dict = {"account_id": cfg.unipile_account_id}
-    if sections:
-        params["with_sections"] = sections
+    rather than dying with a traceback.
+
+    v1 and v2 place account_id differently: v1 takes it as a query parameter,
+    v2 makes it a path segment (/v2/{account_id}/users/{id})."""
+    params: dict = dict(sections)
+    if api_version == "v2":
+        path = f"/{cfg.unipile_account_id}/users/{identifier}"
+    else:
+        path = f"/users/{identifier}"
+        params["account_id"] = cfg.unipile_account_id
     try:
-        r = client.get(f"/users/{identifier}", params=params)
+        r = client.get(path, params=params)
     except httpx.ConnectError as e:
         return "CONNECT_ERROR", _scrub(str(e), cfg)[:200]
     except httpx.TimeoutException:
@@ -246,7 +264,7 @@ def main() -> int:
             bodies: dict[str, dict | str] = {}
 
             for variant, sections in SECTION_VARIANTS.items():
-                status, payload = _fetch(client, cfg, ident, sections)
+                status, payload = _fetch(client, cfg, ident, sections, args.api_version)
                 if status != 200:
                     print(f"  {variant:11s} FAILED ({status})")
                     for line in _explain_failure(status, str(payload)):
@@ -261,17 +279,22 @@ def main() -> int:
                 if isinstance(payload, dict):
                     print(f"  {variant:11s} HTTP 200, {len(payload)} top-level keys -> {path.name}")
 
-            if "baseline" not in bodies or "experience" not in bodies:
+            if "baseline" not in bodies:
                 verdicts.append({"id": short, "verdict": "FETCH_FAILED"})
                 continue
 
-            # Does with_sections change anything at all on this API version?
-            same = json.dumps(bodies["baseline"], sort_keys=True) == \
-                   json.dumps(bodies["experience"], sort_keys=True)
-            print(f"  with_sections honored? {'NO - responses identical' if same else 'YES - response differs'}")
+            # Which parameter spelling actually changes the response? Seeing
+            # with_sections match baseline while linkedin_sections differs is
+            # the proof that the spelling, not the API, was the limitation.
+            base_json = json.dumps(bodies["baseline"], sort_keys=True)
+            for variant in ("with_sections", "linkedin_sections", "sections_all"):
+                if variant not in bodies:
+                    continue
+                differs = json.dumps(bodies[variant], sort_keys=True) != base_json
+                print(f"  {variant:18s} changes response? {'YES' if differs else 'no'}")
 
             best_variant, best_positions, best_path = None, [], None
-            for variant in ("experience", "full", "baseline"):
+            for variant in ("sections_all", "linkedin_sections", "with_sections", "baseline"):
                 body = bodies.get(variant)
                 if not isinstance(body, dict):
                     continue
@@ -293,6 +316,22 @@ def main() -> int:
                 mark = "OK  " if key else "MISS"
                 print(f"    [{mark}] {field:12s} -> {key or '(not present)'}")
             print(f"    position keys seen: {sorted(best_positions[0].keys())}")
+
+            # Date granularity decides whether the transition detectors can
+            # work at all: "started within 180 days" is meaningless if every
+            # start date is 1/1/YYYY. Print the raw values so the precision is
+            # visible rather than assumed.
+            start_key, end_key = report["start_date"], report["end_date"]
+            if start_key:
+                samples = [(p.get(start_key), p.get(end_key) if end_key else None)
+                           for p in best_positions[:5]]
+                print(f"    date samples (start, end): {samples}")
+                day_month_precision = sum(
+                    1 for s, _ in samples
+                    if isinstance(s, str) and not s.startswith("1/1/")
+                )
+                print(f"    positions with finer-than-year precision: "
+                      f"{day_month_precision}/{len(samples)}")
 
             has_dates = bool(report["start_date"])
             verdicts.append({
