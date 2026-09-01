@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -79,6 +80,54 @@ CREATE TABLE IF NOT EXISTS pending_drafts (
 
 CREATE INDEX IF NOT EXISTS idx_drafts_status ON pending_drafts(status);
 CREATE INDEX IF NOT EXISTS idx_drafts_prospect ON pending_drafts(prospect_id);
+
+-- A detected event about a prospect: a funding round, a hiring post, a career
+-- transition. Signals are the structured record of WHY we are reaching out;
+-- prospects.pitch_context becomes a rendered projection of the active one.
+--
+-- Append-only. Nothing updates a signal's facts — a changed world produces a
+-- new signal, so the trail of what we believed when we sent a message stays
+-- intact. Only `status` moves, tracking what we did about it.
+CREATE TABLE IF NOT EXISTS signals (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    prospect_id     INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+    kind            TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'new',
+    confidence      TEXT NOT NULL,
+    detected_at     TEXT NOT NULL,
+    occurred_at     TEXT,
+    expires_at      TEXT,
+    payload         TEXT,
+    -- Stable identity for the underlying real-world event. The UNIQUE index is
+    -- what makes re-scouting the same person idempotent: a second detection of
+    -- the same transition collides here instead of producing a duplicate
+    -- signal and a duplicate draft.
+    dedup_key       TEXT NOT NULL UNIQUE
+);
+
+CREATE INDEX IF NOT EXISTS idx_signals_prospect ON signals(prospect_id);
+CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(status, kind);
+
+-- One supporting fact per row. Every personalized claim in a draft must trace
+-- to one of these, which is what makes a sent message auditable months later.
+--
+-- Append-only and never edited: there are deliberately no update or delete
+-- helpers. Evidence that turns out to be wrong is superseded by a new signal,
+-- not rewritten.
+CREATE TABLE IF NOT EXISTS evidence (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_id       INTEGER NOT NULL REFERENCES signals(id) ON DELETE CASCADE,
+    claim           TEXT NOT NULL,
+    source_type     TEXT NOT NULL,
+    source_url      TEXT,
+    raw_excerpt     TEXT,
+    fetched_at      TEXT NOT NULL,
+    -- Hash of raw_excerpt, so we can later tell whether a claim was built from
+    -- source text that has since changed upstream.
+    checksum        TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_evidence_signal ON evidence(signal_id);
 """
 
 # Pipeline statuses tracked on prospects.status.
@@ -106,6 +155,22 @@ VALID_DISPOSITIONS = (
 VALID_DRAFT_KINDS = ("connect_note", "dm1", "dm2", "dm3", "reply")
 VALID_DRAFT_STATUSES = ("pending", "approved", "rejected", "sent")
 VALID_CAMPAIGN_STATUSES = ("active", "paused", "archived")
+
+# Where a signal is in its lifecycle. Only this field moves after insert —
+# the facts a signal records are immutable.
+VALID_SIGNAL_STATUSES = (
+    "new",         # detected, not yet qualified
+    "qualified",   # passed the ICP gates, eligible to draft from
+    "drafted",     # a draft has been produced for it
+    "actioned",    # the draft was approved and sent
+    "dismissed",   # rejected by a human or by a gate
+    "expired",     # aged out; must never produce a draft
+)
+
+# Three tiers, not a float: a number invites false precision and an argument
+# about thresholds. Each tier maps to a distinct behaviour — 'high' may state
+# the signal as fact, 'medium' must hedge, 'low' never reaches the drafter.
+VALID_CONFIDENCE = ("high", "medium", "low")
 
 
 def now() -> str:
@@ -462,3 +527,143 @@ def cancel_pending_drafts_for(prospect_id: int, reason: str) -> int:
             (now(), reason, prospect_id),
         )
         return cur.rowcount
+
+
+# --- signals + evidence -----------------------------------------------------
+#
+# Signals record WHY we are contacting someone; evidence records HOW WE KNOW.
+# Both are append-only. There are deliberately no update or delete helpers for
+# evidence: a message we already sent must stay explainable by exactly the
+# facts that were true when we sent it.
+
+
+def create_signal(
+    prospect_id: int,
+    kind: str,
+    confidence: str,
+    dedup_key: str,
+    *,
+    payload: str | None = None,
+    occurred_at: str | None = None,
+    expires_at: str | None = None,
+    status: str = "new",
+) -> int | None:
+    """Insert a signal. Returns the new row id, or None when `dedup_key`
+    collides with an existing signal.
+
+    A collision is the normal, expected outcome of re-scouting somebody we
+    already know about — it means "already detected", not "error". Callers
+    should skip, not raise. Mirrors record_message()'s external_id handling.
+    """
+    if confidence not in VALID_CONFIDENCE:
+        raise ValueError(f"invalid confidence {confidence!r}; expected one of {VALID_CONFIDENCE}")
+    if status not in VALID_SIGNAL_STATUSES:
+        raise ValueError(f"invalid signal status {status!r}; expected one of {VALID_SIGNAL_STATUSES}")
+    with connect() as conn:
+        try:
+            cur = conn.execute(
+                """INSERT INTO signals
+                   (prospect_id, kind, status, confidence, detected_at,
+                    occurred_at, expires_at, payload, dedup_key)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (prospect_id, kind, status, confidence, now(),
+                 occurred_at, expires_at, payload, dedup_key),
+            )
+            return int(cur.lastrowid)
+        except sqlite3.IntegrityError:
+            return None
+
+
+def set_signal_status(signal_id: int, status: str) -> None:
+    """The only mutable field on a signal — its lifecycle position."""
+    if status not in VALID_SIGNAL_STATUSES:
+        raise ValueError(f"invalid signal status {status!r}; expected one of {VALID_SIGNAL_STATUSES}")
+    with connect() as conn:
+        conn.execute("UPDATE signals SET status = ? WHERE id = ?", (status, signal_id))
+
+
+def add_evidence(
+    signal_id: int,
+    claim: str,
+    source_type: str,
+    *,
+    source_url: str | None = None,
+    raw_excerpt: str | None = None,
+    fetched_at: str | None = None,
+) -> int:
+    """Attach one supporting fact to a signal.
+
+    `claim` is a short natural-language assertion ("Started as Founder at Acme
+    in March 2026") because that is the string both the drafter and the
+    grounding check consume. `raw_excerpt` holds the verbatim source text it
+    was derived from; its checksum lets us detect later that the upstream
+    source changed.
+    """
+    checksum = None
+    if raw_excerpt is not None:
+        checksum = hashlib.sha256(raw_excerpt.encode("utf-8")).hexdigest()[:16]
+    with connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO evidence
+               (signal_id, claim, source_type, source_url, raw_excerpt, fetched_at, checksum)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (signal_id, claim, source_type, source_url, raw_excerpt,
+             fetched_at or now(), checksum),
+        )
+        return int(cur.lastrowid)
+
+
+def get_signal(signal_id: int) -> sqlite3.Row | None:
+    with connect() as conn:
+        return conn.execute("SELECT * FROM signals WHERE id = ?", (signal_id,)).fetchone()
+
+
+def get_signal_by_dedup_key(dedup_key: str) -> sqlite3.Row | None:
+    """Used after a create_signal() collision to report which signal already
+    covers the event."""
+    with connect() as conn:
+        return conn.execute(
+            "SELECT * FROM signals WHERE dedup_key = ?", (dedup_key,)
+        ).fetchone()
+
+
+def list_evidence(signal_id: int) -> list[sqlite3.Row]:
+    with connect() as conn:
+        cur = conn.execute(
+            "SELECT * FROM evidence WHERE signal_id = ? ORDER BY id", (signal_id,)
+        )
+        return list(cur.fetchall())
+
+
+def get_signal_with_evidence(signal_id: int) -> tuple[sqlite3.Row, list[sqlite3.Row]] | None:
+    """The audit view: a signal plus everything supporting it. Returns None if
+    the signal does not exist."""
+    signal = get_signal(signal_id)
+    if signal is None:
+        return None
+    return signal, list_evidence(signal_id)
+
+
+def list_signals(
+    kind: str | None = None,
+    status: str | None = None,
+    prospect_id: int | None = None,
+    limit: int = 100,
+) -> list[sqlite3.Row]:
+    clauses, params = [], []
+    if kind:
+        clauses.append("kind = ?")
+        params.append(kind)
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    if prospect_id is not None:
+        clauses.append("prospect_id = ?")
+        params.append(prospect_id)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    with connect() as conn:
+        cur = conn.execute(
+            f"SELECT * FROM signals {where} ORDER BY detected_at DESC LIMIT ?", params
+        )
+        return list(cur.fetchall())
