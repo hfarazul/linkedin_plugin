@@ -222,6 +222,21 @@ _PROSPECT_COLUMNS = {
 
 _MESSAGE_COLUMNS = {
     "external_id": "TEXT",
+    # Channel groundwork. Everything existing is LinkedIn, and the default
+    # keeps it that way, so no read path changes. Keeping both channels in one
+    # table means drafter.build_input()'s prior_messages query keeps working
+    # unchanged and a reply draft can see the whole relationship, not half of it.
+    "channel":     "TEXT NOT NULL DEFAULT 'linkedin'",
+    "subject":     "TEXT",   # email only; NULL for LinkedIn messages
+    "thread_id":   "TEXT",   # provider-side conversation id
+}
+
+_DRAFT_COLUMNS = {
+    "channel":   "TEXT NOT NULL DEFAULT 'linkedin'",
+    "subject":   "TEXT",
+    # The signal that justified this draft. The audit link that lets us answer
+    # "why did we send this?" from the draft alone.
+    "signal_id": "INTEGER REFERENCES signals(id)",
 }
 
 
@@ -235,6 +250,7 @@ def _add_missing_columns(conn: sqlite3.Connection, table: str, columns: dict[str
 def _migrate(conn: sqlite3.Connection) -> None:
     _add_missing_columns(conn, "prospects", _PROSPECT_COLUMNS)
     _add_missing_columns(conn, "messages", _MESSAGE_COLUMNS)
+    _add_missing_columns(conn, "pending_drafts", _DRAFT_COLUMNS)
 
 
 # The unique partial index on messages.external_id can only be created after

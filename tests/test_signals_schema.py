@@ -1,10 +1,10 @@
-"""P1-3 — signals and evidence as first-class records.
+"""P1-3 / P1-5 — signals, evidence, and channel groundwork.
 
 Signals record WHY we contacted someone; evidence records HOW WE KNOW. Both
 are append-only, because a message already sent must stay explainable by
 exactly the facts that were true when it went out.
 
-The migration tests matter more than they look: these tables land on a
+The migration tests matter more than they look: these land on a
 production SQLite file that already holds live outreach state, so init_db()
 has to stay idempotent and existing rows must keep their meaning.
 """
@@ -220,3 +220,102 @@ def test_list_signals_filters(db_env) -> None:
     assert len(db.list_signals(status="qualified")) == 1
     assert len(db.list_signals(prospect_id=other)) == 1
     assert len(db.list_signals(kind="transition_to_founder", prospect_id=pid)) == 1
+
+
+# ----------------------------- P1-5 channel columns --------------------------
+
+@pytest.mark.integration
+def test_messages_gained_channel_columns(db_env) -> None:
+    from linkedin_agent import db
+    assert {"channel", "subject", "thread_id"} <= _columns(db, "messages")
+
+
+@pytest.mark.integration
+def test_pending_drafts_gained_channel_columns(db_env) -> None:
+    from linkedin_agent import db
+    assert {"channel", "subject", "signal_id"} <= _columns(db, "pending_drafts")
+
+
+@pytest.mark.integration
+def test_existing_writes_default_to_linkedin(db_env) -> None:
+    """P1-5's whole acceptance criterion: nothing behaves differently. Every
+    existing call site keeps producing LinkedIn rows without being touched."""
+    from linkedin_agent import db
+    pid = _prospect(db)
+    db.record_message(pid, "outbound", "hello")
+    did = db.enqueue_draft(pid, "dm1", "body")
+    with db.connect() as conn:
+        msg = conn.execute("SELECT channel FROM messages WHERE prospect_id = ?", (pid,)).fetchone()
+    assert msg["channel"] == "linkedin"
+    assert db.get_draft(did)["channel"] == "linkedin"
+    assert db.get_draft(did)["signal_id"] is None
+
+
+@pytest.mark.integration
+def test_email_draft_kinds_not_enabled_yet(db_env) -> None:
+    """Email is deliberately deferred (Rule 9). The columns are groundwork, but
+    the kinds land in P6-1 together with length bounds and drafter support, so
+    validation and generation cannot drift apart."""
+    from linkedin_agent import db
+    assert "email1" not in db.VALID_DRAFT_KINDS
+    with pytest.raises(ValueError, match="invalid draft kind"):
+        db.enqueue_draft(_prospect(db), "email1", "body")
+
+
+# ----------------------------- migration on a legacy DB ----------------------
+
+@pytest.mark.integration
+def test_migration_adds_columns_to_a_preexisting_db(tmp_path, monkeypatch) -> None:
+    """Simulate the real upgrade: a DB created by the OLD schema, with live
+    rows, then migrated. Existing data must survive and gain the defaults."""
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE prospects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            linkedin_url TEXT NOT NULL UNIQUE,
+            full_name TEXT, headline TEXT, company TEXT, title TEXT,
+            location TEXT, status TEXT NOT NULL DEFAULT 'targeted',
+            notes TEXT, first_seen_at TEXT NOT NULL, last_action_at TEXT
+        );
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            prospect_id INTEGER NOT NULL,
+            direction TEXT NOT NULL, body TEXT NOT NULL, sent_at TEXT NOT NULL
+        );
+        CREATE TABLE pending_drafts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            prospect_id INTEGER NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            telegram_message_id INTEGER, drafted_at TEXT NOT NULL,
+            decided_at TEXT, reject_reason TEXT
+        );
+        INSERT INTO prospects (linkedin_url, first_seen_at)
+            VALUES ('https://www.linkedin.com/in/legacy', '2026-01-01T00:00:00Z');
+        INSERT INTO messages (prospect_id, direction, body, sent_at)
+            VALUES (1, 'outbound', 'pre-existing message', '2026-01-01T00:00:00Z');
+        INSERT INTO pending_drafts (prospect_id, kind, body, drafted_at)
+            VALUES (1, 'dm1', 'pre-existing draft', '2026-01-01T00:00:00Z');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setenv("LINKEDIN_DB_PATH", str(db_path))
+    import importlib
+    from linkedin_agent import db as db_module
+    importlib.reload(db_module)
+    db_module.init_db()
+
+    assert {"channel", "subject", "thread_id"} <= _columns(db_module, "messages")
+    assert {"signals", "evidence"} <= _tables(db_module)
+
+    with db_module.connect() as conn:
+        msg = conn.execute("SELECT body, channel FROM messages WHERE id = 1").fetchone()
+        draft = conn.execute("SELECT body, channel FROM pending_drafts WHERE id = 1").fetchone()
+    # Data preserved, and backfilled with the LinkedIn default rather than NULL.
+    assert msg["body"] == "pre-existing message"
+    assert msg["channel"] == "linkedin"
+    assert draft["body"] == "pre-existing draft"
+    assert draft["channel"] == "linkedin"
