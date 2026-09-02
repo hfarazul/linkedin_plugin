@@ -2,10 +2,21 @@ from __future__ import annotations
 
 # Inbound message polling.
 #
-# Strategy: each poll fetches the N most recent messages from Unipile and
-# filters for inbound (is_sender == 0). We rely on a unique index on
-# messages.external_id for idempotency — duplicate inserts return None and
-# get skipped, so we don't need a cursor/timestamp tracking table.
+# Strategy: each poll fetches recent inbound messages through
+# Capability.INBOX_READ and relies on the unique index on
+# messages.external_id for idempotency — duplicate inserts return None and get
+# skipped, so we don't need a cursor/timestamp tracking table.
+#
+# Provider-agnostic. Unipile returns individual messages with native ids;
+# PhantomBuster's Inbox Scraper returns one row per thread carrying only the
+# latest message, with no per-message id, so its provider synthesises a
+# deterministic one. Both arrive here as InboundMessage and this module cannot
+# tell them apart.
+#
+# Latency differs and is worth knowing: Unipile polls on demand, while the
+# Inbox Scraper is capped at 8 launches/day (~every 3h). Accepted deliberately
+# for B2B reply times; pin inbox_read back to Unipile via a router override if
+# that stops being true.
 #
 # For each new inbound message we:
 #   1. Look up the prospect by sender provider_id.
@@ -25,10 +36,9 @@ import logging
 from dataclasses import dataclass
 from typing import Sequence
 
-import httpx
-
 from . import db
 from .config import Config
+from .providers import Capability, build_router
 from .telegram import TelegramClient, TelegramError
 
 logger = logging.getLogger("linkedin.poll")
@@ -46,30 +56,6 @@ class PollResult:
     skipped_unknown_sender: int
 
 
-class _UnipileMessages:
-    """Thin client just for the /messages endpoint (no need to hold the full
-    adapter open for polling)."""
-
-    def __init__(self, cfg: Config) -> None:
-        self.cfg = cfg
-        self._client = httpx.Client(
-            base_url=f"https://{cfg.unipile_dsn}/api/v1",
-            headers={"X-API-KEY": cfg.unipile_api_key, "accept": "application/json"},
-            timeout=60.0,
-        )
-
-    def close(self) -> None:
-        self._client.close()
-
-    def recent(self, limit: int = DEFAULT_BATCH) -> list[dict]:
-        r = self._client.get(
-            "/messages",
-            params={"account_id": self.cfg.unipile_account_id, "limit": limit},
-        )
-        r.raise_for_status()
-        return r.json().get("items", [])
-
-
 def poll_once(
     cfg: Config,
     limit: int = DEFAULT_BATCH,
@@ -77,6 +63,7 @@ def poll_once(
     *,
     draft_replies: bool = True,
     drafter=None,
+    router=None,
 ) -> PollResult:
     """Run one polling cycle. Returns a summary so cron-driven callers can log it.
 
@@ -88,12 +75,22 @@ def poll_once(
         from .drafter import draft as default_drafter, DrafterError  # noqa
         drafter = default_drafter
     db.init_db()
-    if not (cfg.unipile_api_key and cfg.unipile_account_id and cfg.unipile_dsn):
-        # Polling requires Unipile. Skip gracefully (e.g. when running daily
-        # in tests with a fake adapter).
+    own_router = router is None
+    if own_router:
+        try:
+            router = build_router(cfg)
+        except Exception as e:
+            logger.warning("no provider configured for polling (%s) — skipping", e)
+            return PollResult(fetched=0, new_inbound=0, matched_prospects=0,
+                              notifications_sent=0, skipped_unknown_sender=0)
+    if not router.owner_of(Capability.INBOX_READ):
+        # Nothing can read the inbox — e.g. running `daily` in tests with a
+        # fake adapter, or credentials absent. Skip rather than fail the cron.
+        logger.info("no provider supports inbox_read — skipping poll")
+        if own_router:
+            router.close()
         return PollResult(fetched=0, new_inbound=0, matched_prospects=0,
                           notifications_sent=0, skipped_unknown_sender=0)
-    msg_client = _UnipileMessages(cfg)
     tg: TelegramClient | None = None
     if notify:
         try:
@@ -105,29 +102,33 @@ def poll_once(
     fetched = new_inbound = matched = sent_notifs = skipped = 0
 
     try:
-        messages = msg_client.recent(limit=limit)
+        messages = router.perform(Capability.INBOX_READ, "fetch_inbox", limit)
         fetched = len(messages)
         # Process oldest-first so notifications arrive in chronological order
         for m in reversed(messages):
-            if m.get("is_sender"):
+            if m.is_from_me:
                 continue   # outbound — we already have it (or it's noise)
 
-            sender_id = m.get("sender_id")
-            if not sender_id:
+            if not m.prospect_provider_id:
                 continue
 
-            prospect = db.get_prospect_by_provider_id(sender_id)
+            prospect = db.get_prospect_by_provider_id(m.prospect_provider_id)
             if not prospect:
                 skipped += 1
                 continue
             matched += 1
 
-            external_id = m.get("id") or m.get("provider_id")
+            external_id = m.external_id
             inserted_id = db.record_message(
                 prospect_id=int(prospect["id"]),
                 direction="inbound",
-                body=m.get("text") or "",
+                body=m.body,
                 external_id=external_id,
+                thread_id=m.thread_id,
+                # The provider's timestamp, not ours: a batch scraper can
+                # surface a reply hours after it arrived, and follow-up timing
+                # reads this column.
+                sent_at=m.sent_at,
             )
             if inserted_id is None:
                 # Duplicate — we've already processed this message in a prior poll.
@@ -155,7 +156,7 @@ def poll_once(
             )
 
             if tg:
-                inbound_body = m.get("text") or ""
+                inbound_body = m.body
                 # Auto-draft a reply suggestion. On success we push the draft
                 # card (which embeds the inbound at the top); on failure we
                 # fall back to the plain notification so the user still sees
@@ -204,7 +205,8 @@ def poll_once(
                         logger.warning("telegram notify failed: %s", e)
 
     finally:
-        msg_client.close()
+        if own_router:
+            router.close()
         if tg:
             tg.close()
 

@@ -110,7 +110,9 @@ The **JSON path is clean**, which is one reason the implementation reads
 `result.json`, never the CSV.
 
 **Rate limits:** 100 threads/launch, up to 8 launches/day (~every 3h), versus
-the current hourly Unipile poll.
+the current hourly Unipile poll. **Accepted deliberately** — B2B replies rarely
+need sub-3-hour detection. Reversible without code changes: pin `inbox_read`
+back to Unipile with a router capability override.
 
 ---
 
@@ -147,7 +149,7 @@ the current hourly Unipile poll.
 - [x] **PB-6** `linkedin providers` — routing visible from the CLI
 - [x] **PB-7** Migrate `enrichment.py` to the router (profile + experience)
 - [x] **P1-2** `positions` table + experience persistence (unblocked by P0-1)
-- [ ] **PB-8** Migrate `poll.py` to the router (inbound + dedup + matching)
+- [x] **PB-8** Migrate `poll.py` to the router (inbound + dedup + matching)
 - [ ] **PB-9** Migrate discovery call sites (`search`, `search-posts`, `funding_lookup`)
 - [ ] **PB-10** Migrate writes (react/connect/DM) — **blocked on T-7, T-8**
 - [ ] **PB-11** Async job table for cron-safe batch execution

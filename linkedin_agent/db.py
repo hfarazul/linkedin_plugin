@@ -445,15 +445,32 @@ def record_message(
     direction: str,
     body: str,
     external_id: str | None = None,
+    *,
+    channel: str = "linkedin",
+    subject: str | None = None,
+    thread_id: str | None = None,
+    sent_at: str | None = None,
 ) -> int | None:
     """Insert a message row. Returns the new row id, or None if external_id
-    collides (deduplication during polling)."""
+    collides (deduplication during polling).
+
+    The keyword-only arguments are additive and all default to today's
+    behaviour, so every existing call site keeps working untouched.
+
+    `sent_at` accepts the provider's own timestamp. Defaulting it to now() —
+    which is what happens when it is omitted — records when we *observed* a
+    message rather than when it was sent, and the two diverge badly with a
+    batch scraper that may surface a reply hours after it arrived.
+    """
     with connect() as conn:
         try:
             cur = conn.execute(
-                """INSERT INTO messages (prospect_id, direction, body, external_id, sent_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (prospect_id, direction, body, external_id, now()),
+                """INSERT INTO messages
+                   (prospect_id, direction, body, external_id, channel,
+                    subject, thread_id, sent_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (prospect_id, direction, body, external_id, channel,
+                 subject, thread_id, sent_at or now()),
             )
             return int(cur.lastrowid)
         except sqlite3.IntegrityError:
