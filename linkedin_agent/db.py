@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -128,6 +129,45 @@ CREATE TABLE IF NOT EXISTS evidence (
 );
 
 CREATE INDEX IF NOT EXISTS idx_evidence_signal ON evidence(signal_id);
+
+-- One job in a prospect's history, normalized across providers.
+--
+-- Stored rather than fetched on demand because detection is a pure function
+-- over these rows: re-running a detector after a rule change costs nothing and
+-- spends no scraping budget.
+--
+-- date_precision is carried explicitly because the providers disagree. Unipile
+-- emits "1/1/YYYY" when only a year is known; PhantomBuster emits "Feb 2026".
+-- A detector asking "did this start within 180 days?" cannot answer honestly
+-- from a year, so precision has to travel with the value instead of being
+-- inferred from it.
+CREATE TABLE IF NOT EXISTS positions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    prospect_id     INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+    company         TEXT NOT NULL,
+    company_id      TEXT,
+    company_url     TEXT,
+    title           TEXT,
+    started_at      TEXT,
+    ended_at        TEXT,
+    is_current      INTEGER NOT NULL DEFAULT 0,
+    date_precision  TEXT NOT NULL DEFAULT 'unknown',
+    location        TEXT,
+    description     TEXT,
+    source          TEXT NOT NULL DEFAULT 'unknown',
+    raw_json        TEXT,
+    fetched_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_positions_prospect ON positions(prospect_id, started_at);
+"""
+
+# Identity of a position, so re-enriching the same prospect updates rows rather
+# than accumulating duplicates. Created after the table for the same reason the
+# messages index is: it must survive a DB that predates the column set.
+_POSITIONS_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_identity
+    ON positions(prospect_id, company, title, started_at);
 """
 
 # Pipeline statuses tracked on prospects.status.
@@ -268,6 +308,7 @@ def init_db() -> None:
         conn.executescript(SCHEMA)
         _migrate(conn)
         conn.executescript(_POST_MIGRATE_INDEXES)
+        conn.executescript(_POSITIONS_INDEX)
 
 
 # --- prospects --------------------------------------------------------------
@@ -543,6 +584,57 @@ def cancel_pending_drafts_for(prospect_id: int, reason: str) -> int:
             (now(), reason, prospect_id),
         )
         return cur.rowcount
+
+
+# --- positions --------------------------------------------------------------
+
+
+def replace_positions(prospect_id: int, positions: list) -> int:
+    """Persist a prospect's job history, replacing what a previous run stored.
+
+    Replace rather than append: a profile is a snapshot, and a person editing
+    or removing a role should not leave a stale row behind for a detector to
+    reason from. Positions carry no independent history of their own — the
+    audit trail lives in `evidence`, which quotes what was true when a message
+    went out.
+
+    Takes provider-neutral Position objects (providers.capabilities.Position),
+    so both vendors write identical rows.
+    """
+    stamp = now()
+    with connect() as conn:
+        conn.execute("DELETE FROM positions WHERE prospect_id = ?", (prospect_id,))
+        written = 0
+        for p in positions:
+            try:
+                conn.execute(
+                    """INSERT INTO positions
+                       (prospect_id, company, company_id, company_url, title,
+                        started_at, ended_at, is_current, date_precision,
+                        location, description, source, raw_json, fetched_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (prospect_id, p.company, p.company_id, p.company_url, p.title,
+                     p.start_date, p.end_date, 1 if p.is_current else 0,
+                     p.date_precision, p.location, p.description, p.source,
+                     json.dumps(p.raw) if p.raw else None, stamp),
+                )
+                written += 1
+            except sqlite3.IntegrityError:
+                # Same company/title/start twice in one payload — keep the first.
+                continue
+        return written
+
+
+def list_positions(prospect_id: int) -> list[sqlite3.Row]:
+    """Newest first. Positions with no parseable start sort last rather than
+    appearing recent."""
+    with connect() as conn:
+        cur = conn.execute(
+            """SELECT * FROM positions WHERE prospect_id = ?
+               ORDER BY started_at IS NULL, started_at DESC""",
+            (prospect_id,),
+        )
+        return list(cur.fetchall())
 
 
 # --- signals + evidence -----------------------------------------------------

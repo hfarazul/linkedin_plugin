@@ -117,8 +117,16 @@ class ProfileFacts:
     network_distance: str | None = None
     follower_count: int | None = None
     connections_count: int | None = None
+    mutual_connections_count: int | None = None
     is_premium: bool | None = None
     is_open_profile: bool | None = None
+    # Unipile supplies these; PhantomBuster does not. They stay None rather
+    # than False so a provider switch cannot overwrite a known value with a
+    # guess — enrichment only writes fields that are not None.
+    is_creator: bool | None = None
+    is_influencer: bool | None = None
+    is_relationship: bool | None = None
+    pronoun: str | None = None
     email: str | None = None               # PhantomBuster Profile Scraper only
     company_name: str | None = None
     company_employee_count: int | None = None   # PhantomBuster only
