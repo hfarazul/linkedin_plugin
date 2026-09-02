@@ -23,6 +23,7 @@ from .capabilities import (
     ProfileFacts,
     is_write,
 )
+from .pb_jobs import PhantomBusterJobs
 from .router import CapabilityRouter, NoProviderAvailable
 
 __all__ = [
@@ -30,7 +31,7 @@ __all__ = [
     "CapabilityRouter", "InboundMessage", "MalformedResponse",
     "NoProviderAvailable", "Position", "ProfileFacts", "ProviderAuthError",
     "ProviderError", "ProviderRateLimited", "ProviderTimeout",
-    "UnsupportedCapability", "is_write",
+    "PhantomBusterJobs", "UnsupportedCapability", "is_write",
 ]
 
 

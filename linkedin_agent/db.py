@@ -160,7 +160,38 @@ CREATE TABLE IF NOT EXISTS positions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_positions_prospect ON positions(prospect_id, started_at);
+
+-- Outstanding provider work that cannot be waited on inline.
+--
+-- Unipile answers in milliseconds; PhantomBuster boots a browser and scrapes
+-- for seconds to minutes. Blocking on the latter inside daily.py's per-prospect
+-- loop would make an hourly cron overrun its own schedule, so async work is
+-- submitted on one tick and collected on a later one.
+--
+-- Synchronous providers still get a row: they are submitted and completed in
+-- the same call, which keeps one code path and one audit trail regardless of
+-- which provider served the request.
+CREATE TABLE IF NOT EXISTS research_jobs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    capability      TEXT NOT NULL,
+    provider        TEXT NOT NULL,
+    prospect_id     INTEGER REFERENCES prospects(id) ON DELETE CASCADE,
+    target          TEXT,               -- identifier the job was launched for
+    container_id    TEXT,               -- provider-side run id, async only
+    status          TEXT NOT NULL DEFAULT 'running',
+    arguments       TEXT,
+    result_summary  TEXT,
+    error           TEXT,
+    submitted_at    TEXT NOT NULL,
+    completed_at    TEXT,
+    attempts        INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON research_jobs(status, submitted_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_prospect ON research_jobs(prospect_id);
 """
+
+VALID_JOB_STATUSES = ("running", "finished", "failed", "timeout")
 
 # Identity of a position, so re-enriching the same prospect updates rows rather
 # than accumulating duplicates. Created after the table for the same reason the
@@ -651,6 +682,94 @@ def list_positions(prospect_id: int) -> list[sqlite3.Row]:
                ORDER BY started_at IS NULL, started_at DESC""",
             (prospect_id,),
         )
+        return list(cur.fetchall())
+
+
+# --- research jobs ----------------------------------------------------------
+
+
+def create_job(capability: str, provider: str, *, prospect_id: int | None = None,
+               target: str | None = None, container_id: str | None = None,
+               arguments: str | None = None, status: str = "running") -> int:
+    if status not in VALID_JOB_STATUSES:
+        raise ValueError(f"invalid job status {status!r}; expected one of {VALID_JOB_STATUSES}")
+    with connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO research_jobs
+               (capability, provider, prospect_id, target, container_id,
+                arguments, status, submitted_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (capability, provider, prospect_id, target, container_id,
+             arguments, status, now()),
+        )
+        return int(cur.lastrowid)
+
+
+def finish_job(job_id: int, *, status: str, result_summary: str | None = None,
+               error: str | None = None) -> None:
+    if status not in VALID_JOB_STATUSES:
+        raise ValueError(f"invalid job status {status!r}; expected one of {VALID_JOB_STATUSES}")
+    with connect() as conn:
+        conn.execute(
+            """UPDATE research_jobs
+               SET status = ?, result_summary = ?, error = ?, completed_at = ?
+               WHERE id = ?""",
+            (status, result_summary, error, now(), job_id),
+        )
+
+
+def bump_job_attempts(job_id: int) -> int:
+    """Count poll attempts so a wedged container can be timed out rather than
+    polled forever on every cron tick."""
+    with connect() as conn:
+        conn.execute(
+            "UPDATE research_jobs SET attempts = attempts + 1 WHERE id = ?", (job_id,))
+        row = conn.execute(
+            "SELECT attempts FROM research_jobs WHERE id = ?", (job_id,)).fetchone()
+        return int(row["attempts"]) if row else 0
+
+
+def list_open_jobs(capability: str | None = None, limit: int = 100) -> list[sqlite3.Row]:
+    with connect() as conn:
+        if capability:
+            cur = conn.execute(
+                """SELECT * FROM research_jobs WHERE status = 'running'
+                   AND capability = ? ORDER BY submitted_at LIMIT ?""",
+                (capability, limit))
+        else:
+            cur = conn.execute(
+                """SELECT * FROM research_jobs WHERE status = 'running'
+                   ORDER BY submitted_at LIMIT ?""", (limit,))
+        return list(cur.fetchall())
+
+
+def get_job(job_id: int) -> sqlite3.Row | None:
+    with connect() as conn:
+        return conn.execute(
+            "SELECT * FROM research_jobs WHERE id = ?", (job_id,)).fetchone()
+
+
+def has_open_job(capability: str, prospect_id: int) -> bool:
+    """Prevents re-submitting work already in flight — the async equivalent of
+    the `_has_pending_draft` guard in daily.py."""
+    with connect() as conn:
+        cur = conn.execute(
+            """SELECT 1 FROM research_jobs
+               WHERE status = 'running' AND capability = ? AND prospect_id = ?
+               LIMIT 1""", (capability, prospect_id))
+        return cur.fetchone() is not None
+
+
+def list_jobs(status: str | None = None, limit: int = 50) -> list[sqlite3.Row]:
+    with connect() as conn:
+        if status:
+            cur = conn.execute(
+                "SELECT * FROM research_jobs WHERE status = ? "
+                "ORDER BY submitted_at DESC LIMIT ?", (status, limit))
+        else:
+            cur = conn.execute(
+                "SELECT * FROM research_jobs ORDER BY submitted_at DESC LIMIT ?",
+                (limit,))
         return list(cur.fetchall())
 
 

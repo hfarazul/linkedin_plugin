@@ -263,6 +263,10 @@ def prospect_hit_from_row(row: dict) -> ProspectHit | None:
 
 class PhantomBusterProvider(CapabilityProvider):
     name = "phantombuster"
+    # Every capability runs a container: launch, boot a browser, scrape, write
+    # to S3. Seconds to minutes, so callers in a loop must queue rather than
+    # block. See linkedin_agent/research_jobs.py.
+    is_async = True
 
     def __init__(self, cfg: Config, *, jobs: PhantomBusterJobs | None = None) -> None:
         self.cfg = cfg

@@ -460,6 +460,50 @@ def status() -> None:
 
 
 @cli.command()
+@click.option("--collect", is_flag=True, help="Poll running jobs and apply finished results.")
+@click.option("--status", "status_filter", default=None,
+              help="Filter the listing: running / finished / failed / timeout.")
+@click.option("--limit", default=20, type=int)
+def jobs(collect: bool, status_filter: str | None, limit: int) -> None:
+    """Provider work that runs asynchronously.
+
+    PhantomBuster boots a browser per call, so work is submitted on one cron
+    tick and collected on a later one rather than blocking the cycle. Run with
+    --collect from cron; without it, this just lists what is outstanding.
+    """
+    from . import research_jobs
+    cfg = load_config()
+    db.init_db()
+
+    if collect:
+        result = research_jobs.collect(cfg)
+        console.print(f"[green]✓[/green] {result.summary()}")
+        for err in result.errors[:5]:
+            console.print(f"  [red]✗[/red] {err}")
+        console.print()
+
+    rows = db.list_jobs(status=status_filter, limit=limit)
+    if not rows:
+        console.print("[dim]no jobs[/dim]")
+        return
+    t = Table(title=f"Research jobs ({len(rows)})")
+    for col in ("id", "capability", "provider", "prospect", "status", "submitted", "detail"):
+        t.add_column(col)
+    colours = {"running": "yellow", "finished": "green",
+               "failed": "red", "timeout": "red"}
+    for r in rows:
+        colour = colours.get(r["status"], "white")
+        t.add_row(
+            str(r["id"]), r["capability"], r["provider"],
+            str(r["prospect_id"] or "—"),
+            f"[{colour}]{r['status']}[/{colour}]",
+            (r["submitted_at"] or "")[:16],
+            (r["result_summary"] or r["error"] or "—")[:40],
+        )
+    console.print(t)
+
+
+@cli.command()
 def providers() -> None:
     """Show which provider owns each LinkedIn capability.
 

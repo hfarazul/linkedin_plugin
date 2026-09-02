@@ -152,7 +152,8 @@ back to Unipile with a router capability override.
 - [x] **PB-8** Migrate `poll.py` to the router (inbound + dedup + matching)
 - [ ] **PB-9** Migrate discovery call sites (`search`, `search-posts`, `funding_lookup`)
 - [ ] **PB-10** Migrate writes (react/connect/DM) — **blocked on T-7, T-8**
-- [ ] **PB-11** Async job table for cron-safe batch execution
+- [x] **PB-11** Async job table for cron-safe batch execution
+      (`research_jobs` table, `research_jobs.py`, `linkedin jobs [--collect]`)
 - [ ] **PB-12** Flip defaults to PhantomBuster-primary; Unipile fallback only
 
 ---

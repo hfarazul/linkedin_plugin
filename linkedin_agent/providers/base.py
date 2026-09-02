@@ -101,6 +101,13 @@ class CapabilityProvider(ABC):
 
     name: str = "unknown"
 
+    # True when work takes long enough that a caller must not block on it.
+    # Unipile answers in milliseconds; PhantomBuster boots a browser and
+    # scrapes for seconds to minutes. Callers use this to decide whether to
+    # run inline or hand the work to the research_jobs queue — the distinction
+    # is a property of the provider, not something call sites should hardcode.
+    is_async: bool = False
+
     @abstractmethod
     def supports(self, capability: Capability) -> bool:
         """True only if this provider can actually perform the capability
