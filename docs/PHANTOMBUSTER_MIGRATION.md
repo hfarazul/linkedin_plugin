@@ -145,7 +145,8 @@ the current hourly Unipile poll.
 - [x] **PB-4** Capability gating so unverified capabilities cannot silently go live
 - [x] **PB-5** Config: `LINKEDIN_PRIMARY_PROVIDER`, agent-id mapping
 - [x] **PB-6** `linkedin providers` — routing visible from the CLI
-- [ ] **PB-7** Migrate `enrichment.py` to the router (profile + experience)
+- [x] **PB-7** Migrate `enrichment.py` to the router (profile + experience)
+- [x] **P1-2** `positions` table + experience persistence (unblocked by P0-1)
 - [ ] **PB-8** Migrate `poll.py` to the router (inbound + dedup + matching)
 - [ ] **PB-9** Migrate discovery call sites (`search`, `search-posts`, `funding_lookup`)
 - [ ] **PB-10** Migrate writes (react/connect/DM) — **blocked on T-7, T-8**
