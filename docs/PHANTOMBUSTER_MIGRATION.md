@@ -100,8 +100,9 @@ exiting… Got 0 thread. No new threads found."` It returns only threads new
 since the last run, so it deduplicates at source. The synthetic key is a safety
 net, not the primary mechanism.
 
-**Unread filter — behaviour UNVERIFIED.** Available as an input, but the test
-inbox had no unread messages. Matters because thread ordering is *not* by
+**Unread filter — configured, behaviour UNVERIFIED.** The agent runs with
+`"inboxFilter": "unread"` (confirmed via `agents/fetch`), but the test inbox
+had no unread messages, so selection behaviour is untested. Matters because thread ordering is *not* by
 recency (observed rows spanned 2025-03 → 2026-05 unsorted), so with the
 100-threads/launch cap a busy inbox could push a new reply out of the window.
 
@@ -138,6 +139,11 @@ back to Unipile with a router capability override.
 - [ ] **T-8** Message Sender per-recipient delivery confirmation. The send funnel
       starts the follow-up clock off this signal.
 - [ ] **T-9** Unread filter behaviour (needs an actual unread message).
+      Partial: the agent's saved arguments show `"inboxFilter": "unread"`,
+      so the filter is CONFIGURED. That is not behaviour — T-9 needs an
+      actual unread message to prove the filter selects correctly.
+      Also explains the empty first smoke run: no unread messages, rather
+      than incremental exhaustion.
 - [ ] **T-10** Agent-slot tier. ~10 Phantoms needed; the plan allows **5**.
 
 ### Implementation
@@ -150,6 +156,11 @@ back to Unipile with a router capability override.
 - [x] **PB-7** Migrate `enrichment.py` to the router (profile + experience)
 - [x] **P1-2** `positions` table + experience persistence (unblocked by P0-1)
 - [x] **PB-8** Migrate `poll.py` to the router (inbound + dedup + matching)
+      — implementation complete and fully unit/integration tested (387 tests).
+      Remaining: **live-data verification** — confirm a newly received
+      LinkedIn message is returned by the real Inbox Scraper and passes
+      through normalization → provider-ID matching → persistence →
+      Telegram draft workflow. Run `scripts/smoke_pb_inbox.py --expect-from`.
 - [ ] **PB-9** Migrate discovery call sites (`search`, `search-posts`, `funding_lookup`)
 - [ ] **PB-10** Migrate writes (react/connect/DM) — **blocked on T-7, T-8**
 - [x] **PB-11** Async job table for cron-safe batch execution
@@ -187,3 +198,20 @@ year-only date.
 | Structured action errors | No PhantomBuster equivalent; `cooldown_until` depends on `422 already_invited_recently` | Cooldown state is tracked locally via Sent Request Extractor |
 | Post/content search | Unverified on PhantomBuster | T-3 passes |
 | All writes | Unverified on PhantomBuster | T-7 and T-8 pass |
+
+
+---
+
+## 6. Operational security
+
+**A Phantom's saved arguments contain the LinkedIn `sessionCookie`.**
+`GET /agents/fetch` returns it in clear text. That cookie *is* the account:
+anyone holding it can act as the user until it is invalidated.
+
+`scripts/smoke_pb_inbox.py --show-args` redacts it, but any ad-hoc script
+calling `agents/fetch` will print it. Treat agent-argument dumps the way you
+would treat a password.
+
+This is a structural difference from Unipile, which holds the session on its
+own side and never returns it. It is the concrete form of the ban/credential
+risk noted when the provider decision was made.
