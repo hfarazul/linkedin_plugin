@@ -33,6 +33,8 @@ from __future__ import annotations
 from __future__ import annotations
 
 import logging
+import os
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -45,6 +47,38 @@ logger = logging.getLogger("linkedin.poll")
 
 # Per-poll batch size. Tune up if we ever miss messages between polls.
 DEFAULT_BATCH = 50
+
+# An inbound older than this is recorded but never auto-drafted against.
+#
+# The Inbox Scraper is incremental, so its FIRST run against a real account
+# returns the whole backlog. The captured inbox from agent 1327575646342095
+# contained threads whose last message was 15 months old. Without this guard,
+# switching the provider would flood Telegram with drafted replies to
+# year-old messages — and one approved by reflex would be genuinely
+# embarrassing to send.
+#
+# The message is still recorded (history and dedup both need it) and the
+# operator is still notified; only the automatic drafting is suppressed.
+REPLY_DRAFT_MAX_AGE_DAYS = int(os.getenv("REPLY_DRAFT_MAX_AGE_DAYS", "30"))
+
+
+def _is_stale(sent_at: str | None, *, now: datetime | None = None) -> bool:
+    """True when an inbound is too old to auto-reply to.
+
+    Unparseable or missing timestamps are treated as NOT stale: Unipile's
+    payloads do not always carry one, and suppressing drafts for every message
+    we cannot date would silently disable the reply flow.
+    """
+    if not sent_at:
+        return False
+    try:
+        when = datetime.fromisoformat(str(sent_at).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return (now - when) > timedelta(days=REPLY_DRAFT_MAX_AGE_DAYS)
 
 
 @dataclass
@@ -162,7 +196,12 @@ def poll_once(
                 # fall back to the plain notification so the user still sees
                 # the reply landed.
                 draft_pushed = False
-                if draft_replies and inbound_body.strip():
+                stale = _is_stale(m.sent_at)
+                if stale:
+                    logger.info(
+                        "inbound for prospect %d is %s — recording it but not "
+                        "drafting a reply", prospect["id"], m.sent_at)
+                if draft_replies and inbound_body.strip() and not stale:
                     try:
                         reply_body = drafter("reply", int(prospect["id"]))
                         draft_id = db.enqueue_draft(
