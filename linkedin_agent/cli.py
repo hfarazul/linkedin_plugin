@@ -13,6 +13,28 @@ from .adapters import get_adapter
 from .config import load as load_config
 from .telegram import TelegramClient, TelegramError
 
+# Windows consoles default to a legacy code page (cp1252), which cannot encode
+# the ✓/⚠/emoji characters rich prints — every command that emits one dies with
+# UnicodeEncodeError, including inside the test suite's CLI subprocesses.
+# Force UTF-8 on the streams before rich captures them. No-op on POSIX, where
+# stdout is already UTF-8.
+if sys.platform == "win32":
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            if _stream.isatty():
+                # A real console: switch to UTF-8 so the glyphs render.
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+            else:
+                # Piped or captured. Keep the locale encoding the reader on the
+                # other end expects — forcing UTF-8 here just moves the crash
+                # into their decoder — and only stop it raising on characters
+                # cp1252 can't represent.
+                _stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError, OSError):
+            # Wrapped in something without reconfigure(). Leave it alone rather
+            # than failing at import time.
+            pass
+
 console = Console()
 
 
@@ -435,6 +457,58 @@ def status() -> None:
             console.print(f"    • {name} ({kind})")
 
     console.print()
+
+
+@cli.command()
+def providers() -> None:
+    """Show which provider owns each LinkedIn capability.
+
+    Routing is per capability, so 'which provider are we on' has no single
+    answer — this is the authoritative view. Capabilities showing NONE are
+    unroutable: either no provider supports them, or the one that does is
+    missing credentials or an agent id.
+    """
+    import os
+    from .providers import Capability, build_router, is_write
+
+    cfg = load_config()
+    primary = os.getenv("LINKEDIN_PRIMARY_PROVIDER", "unipile")
+    fallback = os.getenv("LINKEDIN_FALLBACK_PROVIDER") or None
+    console.print()
+    console.print(f"  [bold]primary[/bold]   {primary}")
+    console.print(f"  [bold]fallback[/bold]  {fallback or '(none)'}")
+    console.print()
+
+    try:
+        router = build_router(cfg, primary=primary, fallback=fallback)
+    except Exception as e:
+        console.print(f"[red]could not build router: {e}[/red]")
+        sys.exit(1)
+
+    try:
+        t = Table(show_header=True, header_style="bold")
+        for col in ("capability", "kind", "owner"):
+            t.add_column(col)
+        for cap in Capability:
+            owner = router.owner_of(cap)
+            kind = "write" if is_write(cap) else "read"
+            if owner is None:
+                shown = "[red]NONE[/red]"
+            elif owner == primary:
+                shown = f"[green]{owner}[/green]"
+            else:
+                shown = f"[yellow]{owner}[/yellow] (fallback)"
+            t.add_row(cap.value, kind, shown)
+        console.print(t)
+        unrouted = [c.value for c in Capability if router.owner_of(c) is None]
+        if unrouted:
+            console.print()
+            console.print(f"[yellow]unroutable:[/yellow] {', '.join(unrouted)}")
+            console.print("[dim]check credentials, agent ids, and "
+                          "PHANTOMBUSTER_ENABLE_UNVERIFIED[/dim]")
+        console.print()
+    finally:
+        router.close()
 
 
 @cli.command()
