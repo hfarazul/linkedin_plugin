@@ -514,16 +514,19 @@ def test_email_draft_retries_on_a_scraped_detail(monkeypatch, tmp_path) -> None:
     import linkedin_agent.drafter as d
 
     attempts = []
+    # This body was previously the old template verbatim. It now trips the
+    # filler and unsupported-pain gates, which is correct — that template is
+    # what those gates exist to remove — so the fixture is a draft that passes
+    # them, leaving this test measuring the one thing it is about: whether a
+    # scraped date drives a retry.
     good = (
-        "Hi Anjan,\n\nWe have yet to be properly introduced, but I'm Haque with "
-        "Cortivo, and what caught my eye is the move from building dan Lab's "
-        "agentic systems to TalkingLands.\n\nMost founders at that transition "
-        "point end up rebuilding internal tooling and data pipelines by hand "
-        "while the product gets the attention. We would build the custom systems "
-        "that take that load off.\n\nThat's our outside read. Curious if the real "
-        "squeeze is closer to go-to-market ops or product velocity, or somewhere "
-        "we haven't surfaced.\n\nDo you have time this week to walk through what "
-        "we'd build?\n\nBest,\nHaque Farazul\nCortivo")
+        "Hi Anjan,\n\nSaw you moved over to TalkingLands, which is the only "
+        "reason I'm writing — no list involved.\n\nI'm Haque, co-founder of "
+        "Cortivo. We're a small engineering studio that builds custom software "
+        "for teams who would rather not hire a whole in-house team to get "
+        "something shipped.\n\nI've no idea whether that's useful to you right "
+        "now, and I'm not going to guess at what's on your plate.\n\nWould this "
+        "be relevant on your side?\n\nBest,\nHaque\nCortivo")
 
     def fake_invoke(prompt, timeout=90):
         attempts.append(prompt)
@@ -532,7 +535,7 @@ def test_email_draft_retries_on_a_scraped_detail(monkeypatch, tmp_path) -> None:
         return good
 
     monkeypatch.setattr(d, "_invoke_claude", fake_invoke)
-    monkeypatch.setattr(d, "build_input", lambda kind, pid, recent_posts=None:
+    monkeypatch.setattr(d, "build_input", lambda kind, pid, recent_posts=None, evidence=None:
                         d.DrafterInput(kind=kind, campaign={}, prospect={}))
 
     out = d.draft("email1", 1)
@@ -556,6 +559,6 @@ def test_surveillance_gate_does_not_apply_to_linkedin_kinds(monkeypatch) -> None
         "like right now, and is that something you are staffing up or would "
         "rather hand to a pod that already works together?")
     monkeypatch.setattr(d, "_invoke_claude", lambda p, timeout=90: body_with_date)
-    monkeypatch.setattr(d, "build_input", lambda kind, pid, recent_posts=None:
+    monkeypatch.setattr(d, "build_input", lambda kind, pid, recent_posts=None, evidence=None:
                         d.DrafterInput(kind=kind, campaign={}, prospect={}))
     assert d.draft("dm1", 1) == body_with_date

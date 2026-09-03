@@ -121,6 +121,78 @@ _SURVEILLANCE_TELLS = (
 )
 
 
+# Phrasings that assert the prospect has a business problem. Matched only when
+# no SIGNAL licenses such a claim -- see linkedin_agent/evidence.py. A verified
+# career move is not evidence of a tooling problem, and the old email asserted
+# one anyway, to a real person, at their real address.
+#
+# When a claim IS licensed these are allowed through, and whether the claim
+# stays tied to the signal that licensed it is enforced by the prompt, not
+# here. A regex cannot check relevance; it can check that we are not
+# diagnosing strangers.
+_PAIN_CLAIM_PATTERNS = (
+    re.compile(r"(?i)\byou(?:'re| are) (?:probably|likely|no doubt|almost "
+               r"certainly)\b"),
+    re.compile(r"(?i)\b(?:most|many) (?:teams|founders|companies|operators) "
+               r"(?:at|in) (?:that|this|your)\b"),
+    re.compile(r"(?i)\bteams? (?:building|operating|scaling) at (?:that|this) "
+               r"(?:stage|point)\b"),
+    re.compile(r"(?i)\bend up (?:rebuilding|building|doing|wiring|stitching)\b"),
+    re.compile(r"(?i)\bthe real (?:squeeze|bottleneck|constraint|pain)\b"),
+    re.compile(r"(?i)\b(?:struggling|wrestling|grappling) with\b"),
+    re.compile(r"(?i)\bdrowning in\b"),
+    re.compile(r"(?i)\byour (?:bottleneck|technical debt|tooling problem)\b"),
+    re.compile(r"(?i)\bwithout hiring a (?:team|dev team)\b"),
+)
+
+
+def _contains_unsupported_pain_claim(body: str) -> str | None:
+    """Return the phrase asserting an unevidenced problem, or None if clean."""
+    for pattern in _PAIN_CLAIM_PATTERNS:
+        match = pattern.search(body)
+        if match:
+            return match.group(0)
+    return None
+
+
+# Phrasings from the previous template. These are banned as *strings*, not as
+# concepts: a prospect who publicly said they are rebuilding their data
+# pipeline can still be told we build data pipelines. What cannot survive is
+# the reusable scaffolding that made every email the same email with the nouns
+# swapped.
+_FILLER_TELLS = (
+    "what caught my eye is the work you are doing",
+    "teams building at that stage",
+    "internal tooling and data pipelines",
+    "take that load off",
+    "tailored to how your company actually works",
+    "that's our outside read",
+    "thats our outside read",
+    "our outside read",
+    "go-to-market ops or product velocity",
+    "somewhere we haven't surfaced",
+    "somewhere we havent surfaced",
+    "shipping without hiring a team",
+    "walk through what we'd build",
+    "walk through what wed build",
+)
+
+
+def _normalise_quotes(text: str) -> str:
+    """Curly apostrophes are what a model actually emits; match them too."""
+    return (text.replace("’", "'").replace("‘", "'")
+                .replace("“", '"').replace("”", '"'))
+
+
+def _contains_filler(body: str) -> str | None:
+    """Return the recycled template phrase, or None if clean."""
+    low = _normalise_quotes(body.lower())
+    for phrase in _FILLER_TELLS:
+        if phrase in low:
+            return phrase
+    return None
+
+
 def _contains_surveillance_tell(body: str) -> str | None:
     """Return the matched scraped-detail phrase, or None if clean.
 
@@ -142,6 +214,12 @@ class DrafterInput:
     prospect: dict
     recent_posts: list[dict] = field(default_factory=list)
     prior_messages: list[dict] = field(default_factory=list)
+    # Typed evidence from linkedin_agent.evidence. When present it, not the
+    # raw profile fields, is what the drafter is told to write from: the
+    # prospect dict is a bag of strings with no indication of which ones
+    # license a claim, and handing a model such a bag is how "changed jobs"
+    # became "has a tooling problem".
+    evidence: dict | None = None
 
 
 # -------------------------------------------------------------- prompt loading
@@ -168,6 +246,7 @@ def build_input(
     kind: str,
     prospect_id: int,
     recent_posts: Sequence[dict] | None = None,
+    evidence: dict | None = None,
 ) -> DrafterInput:
     """Assemble the JSON payload the drafter prompt expects.
     The caller passes recent_posts because that comes from the adapter, not the DB."""
@@ -224,6 +303,7 @@ def build_input(
         },
         recent_posts=list(recent_posts or []),
         prior_messages=prior,
+        evidence=evidence,
     )
 
 
@@ -235,6 +315,23 @@ def render_prompt(inp: DrafterInput, retry_hint: str | None = None) -> str:
     base = _load_subagent_prompt()
     payload = json.dumps(asdict(inp), indent=2, ensure_ascii=False)
     closing = "Draft now. Return only the message body."
+    if inp.evidence:
+        # Restated outside the JSON because it is the binding constraint, and
+        # a rule buried in a payload field competes with everything else in
+        # the payload for the model's attention.
+        licensed = inp.evidence.get("pain_claim_licensed")
+        closing = (
+            f"Evidence tier for this prospect: "
+            f"{inp.evidence.get('tier')}. "
+            + ("A signal supports a claim about their situation; keep the "
+               "claim tied to that signal and phrase it as a read, not a "
+               "diagnosis."
+               if licensed else
+               "NOTHING licenses a claim about this person's problems. Do "
+               "not state, imply, or hedge one. Reference what is verified, "
+               "introduce Cortivo plainly, ask whether it is relevant.")
+            + f"\n\n{closing}"
+        )
     if retry_hint:
         closing = f"{retry_hint}\n\n{closing}"
     return f"{base}\n\n# Context\n\n```json\n{payload}\n```\n\n{closing}"
@@ -322,11 +419,30 @@ def _clean_output(raw: str) -> str:
 
 # -------------------------------------------------------------- public API
 
+_SUBJECT_RE = re.compile(r"^\s*subject\s*:\s*(.+?)\s*\n+", re.IGNORECASE)
+
+
+def parse_email(text: str) -> tuple[str | None, str]:
+    """Split "Subject: ...\\n\\n<body>" into its two parts.
+
+    The subject is generated by the drafter rather than assembled from a
+    format string, because a fixed "<Company> - <benefit>" structure is a
+    marketing subject line and reads like one on every prospect. A missing
+    subject returns None rather than a fabricated one, so the caller decides
+    what to do instead of silently sending a template.
+    """
+    match = _SUBJECT_RE.match(text)
+    if not match:
+        return None, text.strip()
+    return match.group(1).strip(), text[match.end():].strip()
+
+
 def draft(
     kind: str,
     prospect_id: int,
     recent_posts: Sequence[dict] | None = None,
     max_attempts: int = MAX_DRAFT_ATTEMPTS,
+    evidence: dict | None = None,
 ) -> str:
     """Generate a draft, retrying on recoverable failures (oversize / empty /
     suspiciously short). Raises DrafterError when:
@@ -334,9 +450,24 @@ def draft(
       - All `max_attempts` runs failed quality checks
       - Build fails (missing prospect, invalid kind, etc.)
     """
-    inp = build_input(kind, prospect_id, recent_posts=recent_posts)
+    inp = build_input(kind, prospect_id, recent_posts=recent_posts,
+                      evidence=evidence)
     cap_max = KIND_MAX_CHARS[kind]
     cap_min = KIND_MIN_CHARS.get(kind, 50)
+
+    # Whether this prospect's evidence licenses ANY claim about their problems.
+    # Absent evidence the answer is no for email, which is the fail-closed
+    # direction: an email that diagnoses a stranger with no basis is the
+    # failure being fixed, and silently permitting it whenever the caller
+    # forgot to pass evidence would reintroduce it. DM kinds keep their
+    # existing behaviour unless evidence is supplied, so the live LinkedIn
+    # flow is not changed underneath itself.
+    if evidence is not None:
+        pain_licensed = bool(evidence.get("pain_claim_licensed"))
+        enforce_pain_gate = True
+    else:
+        pain_licensed = False
+        enforce_pain_gate = kind.startswith("email")
 
     last_failure: str | None = None
     last_body_preview: str | None = None
@@ -396,6 +527,42 @@ def draft(
                 f"doing well'. Start with a specific reference instead."
             )
             continue
+
+        # Recycled-template scan. These phrasings were mandated by the old
+        # prompt and appeared verbatim in every email, which is what made
+        # "personalised" output read as a mail merge.
+        filler = _contains_filler(body)
+        if filler:
+            last_failure = f"template filler {filler!r} (attempt {attempt})"
+            last_body_preview = body
+            retry_hint = (
+                f"Your previous attempt reused the stock phrase {filler!r}. "
+                f"That phrasing appeared in every email this system has ever "
+                f"produced, which is precisely why it reads as a template. "
+                f"Say the same thing in words that only make sense for this "
+                f"person, or cut the sentence entirely."
+            )
+            continue
+
+        # Unsupported-diagnosis scan. A claim about the prospect's problems
+        # requires a SIGNAL that they themselves published; a job change, a
+        # job title and a headcount are not evidence of anything.
+        if enforce_pain_gate and not pain_licensed:
+            claim = _contains_unsupported_pain_claim(body)
+            if claim:
+                last_failure = f"unsupported pain claim {claim!r} (attempt {attempt})"
+                last_body_preview = body
+                retry_hint = (
+                    f"Your previous attempt asserted a business problem "
+                    f"({claim!r}) that nothing in the evidence supports. "
+                    f"There is no signal that this person has a build, "
+                    f"tooling or scaling problem — do not infer one from "
+                    f"their job title, their employer, or the fact that they "
+                    f"changed roles. Reference what is verified, introduce "
+                    f"Cortivo plainly, and ask whether it is relevant. A "
+                    f"short honest email beats a confident wrong one."
+                )
+                continue
 
         # Scraped-detail scan, email only. Inside LinkedIn, having seen
         # someone's profile is the medium. A cold email that quotes their
