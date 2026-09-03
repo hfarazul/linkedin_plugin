@@ -1,5 +1,9 @@
 .env
 .env.local
+# Any .env variant: setup.sh writes .env.backup-<timestamp> files, and
+# every one of them carries the full credential set.
+.env.*
+!.env.example
 data/*.db
 data/*.db-journal
 # Daemon logs. These carried a live Telegram bot token (embedded in every
