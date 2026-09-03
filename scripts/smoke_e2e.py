@@ -29,6 +29,7 @@ Stage 12 renders the email that would be sent and stops.
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 import os
 import re
@@ -78,6 +79,11 @@ def main() -> int:
     ap.add_argument("--real-drafter", action="store_true",
                     help="invoke `claude -p` instead of a stub")
     ap.add_argument("--real-telegram", action="store_true")
+    ap.add_argument("--skip-geo", action="store_true",
+                    help="Bypass the geography check so a profile outside "
+                         "the campaign's target region still reaches the "
+                         "later stages. Test harness only -- the ICP rules "
+                         "used by real campaigns are untouched.")
     args = ap.parse_args()
 
     import logging
@@ -219,7 +225,13 @@ def main() -> int:
                                   full_name=facts.full_name,
                                   headline=facts.headline,
                                   location=facts.location)
+                if args.skip_geo:
+                    # Replace the campaign's pattern rather than patching the
+                    # result, so geo_match reports what was actually evaluated
+                    # instead of a hand-set True.
+                    icp = replace(icp, geo_required=re.compile(r""))
                 result = grade(hit, icp)
+                st.note("geo_bypassed", bool(args.skip_geo))
                 st.note("geo_match", result.geo_match)
                 st.note("role_match", result.role_match)
                 st.note("noise_excluded", result.noise_excluded)
