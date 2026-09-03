@@ -34,7 +34,12 @@ from .pb_jobs import PhantomBusterJobs
 
 logger = logging.getLogger("linkedin.providers.phantombuster")
 
-# Capabilities whose real output we have inspected and mapped.
+# What we have actually seen this provider return. Kept separate from what it
+# is allowed to serve, because with Unipile removed PhantomBuster is the only
+# provider — gating a capability off no longer routes around it, it just breaks
+# the pipeline. So everything implemented is enabled, and the distinction lives
+# here so `linkedin providers` can keep showing which capabilities rest on
+# inspected output and which are still taken on trust.
 VERIFIED = frozenset({
     Capability.PROFILE,
     Capability.EXPERIENCE,
@@ -42,18 +47,25 @@ VERIFIED = frozenset({
     Capability.ACCEPTANCE_CHECK,   # connectionDegree is in Profile Scraper output
 })
 
-# Implemented, but the Phantom's real output has never been seen. Enable one
-# explicitly with PHANTOMBUSTER_ENABLE_UNVERIFIED=search_people,react — the
-# opt-in is deliberately awkward because the write capabilities in this set
-# reach real people irreversibly.
-IMPLEMENTED_UNVERIFIED = frozenset({
+# Implemented and enabled, but the Phantom's real output has never been seen.
+# The writes in this set reach real people irreversibly, and a container that
+# finishes is not per-recipient delivery confirmation — which is why writes
+# return ActionResult(status="unknown") rather than claiming success.
+UNVERIFIED = frozenset({
     Capability.SEARCH_PEOPLE,
-    Capability.SEARCH_POSTS,
     Capability.RECENT_POSTS,
     Capability.REACT,
     Capability.CONNECT,
     Capability.SEND_DM,
 })
+
+# No PhantomBuster equivalent found for keyword search over post CONTENT.
+# Search Export documents a Content/Posts mode behind "advanced setup", but its
+# output shape is unverified and PostHit needs the post body. Declared here so
+# `providers` reports it as a real gap rather than an oversight.
+UNSUPPORTED = frozenset({Capability.SEARCH_POSTS})
+
+SUPPORTED = VERIFIED | UNVERIFIED
 
 # Env var name -> agent id, so agent ids are configuration, not literals.
 AGENT_ENV = {
@@ -281,15 +293,21 @@ class PhantomBusterProvider(CapabilityProvider):
     # ------------------------------------------------------------ capability
 
     def supports(self, capability: Capability) -> bool:
+        # Configuration is still a hard requirement: without an API key or an
+        # agent id for this capability there is nothing to call, and saying so
+        # here produces a clean "no provider" error instead of a failure
+        # halfway through an operation.
         if not self.api_key or not self._agent_id(capability):
             return False
+        return capability in SUPPORTED
+
+    def verification(self, capability: Capability) -> str:
+        """VERIFIED / UNVERIFIED / UNSUPPORTED — surfaced by `providers`."""
         if capability in VERIFIED:
-            return True
-        if capability in IMPLEMENTED_UNVERIFIED:
-            # Opt-in only. Keeps an untested Phantom from reaching real
-            # prospects on the first cron fire.
-            return capability.value in self._enabled_unverified
-        return False
+            return "verified"
+        if capability in UNVERIFIED:
+            return "unverified"
+        return "unsupported"
 
     def _agent_id(self, capability: Capability) -> str | None:
         env = AGENT_ENV.get(capability)

@@ -279,21 +279,42 @@ def test_verified_capability_requires_a_configured_agent(monkeypatch) -> None:
 
 
 @pytest.mark.unit
-def test_unverified_write_is_off_by_default(monkeypatch) -> None:
-    """The safety property that matters most: an untested Auto Connect must not
-    reach real prospects on the first cron fire just because a Phantom exists."""
+def test_writes_are_enabled_but_reported_as_unverified(monkeypatch) -> None:
+    """Changed when Unipile was removed.
+
+    While a fallback existed, gating an unverified capability OFF routed
+    around it. With PhantomBuster the only provider, gating it off does not
+    route around anything — it just breaks the pipeline. So writes are enabled,
+    and the fact that their output has never been inspected is surfaced through
+    verification() and the `providers` view instead of by refusing to serve.
+
+    The safety property moved rather than disappeared: an unverified write
+    still returns ActionResult(status="unknown") rather than claiming delivery.
+    """
     monkeypatch.setenv("PHANTOMBUSTER_API_KEY", "k" * 20)
     monkeypatch.setenv("PHANTOMBUSTER_AGENT_AUTO_CONNECT", "456")
-    monkeypatch.delenv("PHANTOMBUSTER_ENABLE_UNVERIFIED", raising=False)
-    assert not PhantomBusterProvider(_Cfg()).supports(Capability.CONNECT)
+    provider = PhantomBusterProvider(_Cfg())
+    assert provider.supports(Capability.CONNECT)
+    assert provider.verification(Capability.CONNECT) == "unverified"
 
 
 @pytest.mark.unit
-def test_unverified_capability_can_be_explicitly_enabled(monkeypatch) -> None:
+def test_verified_capabilities_are_reported_as_such(monkeypatch) -> None:
     monkeypatch.setenv("PHANTOMBUSTER_API_KEY", "k" * 20)
-    monkeypatch.setenv("PHANTOMBUSTER_AGENT_AUTO_CONNECT", "456")
-    monkeypatch.setenv("PHANTOMBUSTER_ENABLE_UNVERIFIED", "connect")
-    assert PhantomBusterProvider(_Cfg()).supports(Capability.CONNECT)
+    monkeypatch.setenv("PHANTOMBUSTER_AGENT_PROFILE_SCRAPER", "123")
+    provider = PhantomBusterProvider(_Cfg())
+    assert provider.verification(Capability.PROFILE) == "verified"
+
+
+@pytest.mark.unit
+def test_post_search_has_no_phantombuster_equivalent(monkeypatch) -> None:
+    """A real product gap, not an oversight. With no fallback left, the
+    capability is simply unroutable and `providers` must say so."""
+    monkeypatch.setenv("PHANTOMBUSTER_API_KEY", "k" * 20)
+    monkeypatch.setenv("PHANTOMBUSTER_AGENT_SEARCH_EXPORT", "789")
+    provider = PhantomBusterProvider(_Cfg())
+    assert not provider.supports(Capability.SEARCH_POSTS)
+    assert provider.verification(Capability.SEARCH_POSTS) == "unsupported"
 
 
 @pytest.mark.unit

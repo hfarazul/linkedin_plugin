@@ -137,3 +137,72 @@ class FakeTelegramClient:
     def get_updates(self, offset=None, timeout=25) -> list[dict]:
         # Tests that need updates inject them directly via the daemon's dispatch.
         return []
+
+
+# ----- provider fakes -------------------------------------------------------
+
+class FakeProvider:
+    """A CapabilityProvider that serves canned normalized objects.
+
+    Replaces the respx/HTTP mocking that targeted Unipile's endpoints. Those
+    tests proved the pipeline worked *through Unipile's transport*; with the
+    provider removed, the assertions that still matter are about pipeline
+    behaviour, so they are retargeted here rather than deleted.
+    """
+
+    name = "phantombuster"
+    is_async = False
+
+    def __init__(self, *, profile=None, inbox=None, accepted=None,
+                 hits=None, posts=None, supports_all=True, raises=None):
+        self._profile = profile
+        self._inbox = inbox or []
+        self._accepted = accepted
+        self._hits = hits or []
+        self._posts = posts or []
+        self._supports_all = supports_all
+        self._raises = raises
+        self.calls: list = []
+
+    def supports(self, capability):
+        return self._supports_all
+
+    def verification(self, capability):
+        return "verified"
+
+    def _maybe_raise(self):
+        if self._raises:
+            raise self._raises
+
+    def fetch_profile(self, identifier, *, with_experience=False):
+        self.calls.append(("fetch_profile", identifier))
+        self._maybe_raise()
+        return self._profile
+
+    def check_acceptance(self, identifier):
+        self.calls.append(("check_acceptance", identifier))
+        self._maybe_raise()
+        return self._accepted
+
+    def fetch_inbox(self, limit=50):
+        self.calls.append(("fetch_inbox", limit))
+        self._maybe_raise()
+        return list(self._inbox)
+
+    def search_people(self, query, limit=20):
+        self.calls.append(("search_people", query))
+        self._maybe_raise()
+        return list(self._hits)[:limit]
+
+    def get_recent_posts(self, linkedin_url, limit=5):
+        self.calls.append(("get_recent_posts", linkedin_url))
+        self._maybe_raise()
+        return list(self._posts)[:limit]
+
+    def close(self):
+        self.calls.append(("close",))
+
+
+def fake_router(provider):
+    from linkedin_agent.providers.router import CapabilityRouter
+    return CapabilityRouter(provider, None)

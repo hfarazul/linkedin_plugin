@@ -516,7 +516,7 @@ def providers() -> None:
     from .providers import Capability, build_router, is_write
 
     cfg = load_config()
-    primary = os.getenv("LINKEDIN_PRIMARY_PROVIDER", "unipile")
+    primary = os.getenv("LINKEDIN_PRIMARY_PROVIDER", "phantombuster")
     fallback = os.getenv("LINKEDIN_FALLBACK_PROVIDER") or None
     console.print()
     console.print(f"  [bold]primary[/bold]   {primary}")
@@ -531,8 +531,9 @@ def providers() -> None:
 
     try:
         t = Table(show_header=True, header_style="bold")
-        for col in ("capability", "kind", "owner"):
+        for col in ("capability", "kind", "owner", "evidence"):
             t.add_column(col)
+        chain = {c: router.providers_for(c) for c in Capability}
         for cap in Capability:
             owner = router.owner_of(cap)
             kind = "write" if is_write(cap) else "read"
@@ -542,7 +543,18 @@ def providers() -> None:
                 shown = f"[green]{owner}[/green]"
             else:
                 shown = f"[yellow]{owner}[/yellow] (fallback)"
-            t.add_row(cap.value, kind, shown)
+            # Whether a capability rests on output we have actually inspected
+            # matters more now that there is no fallback to route around it.
+            evidence = "—"
+            providers_for_cap = chain[cap]
+            if providers_for_cap and hasattr(providers_for_cap[0], "verification"):
+                level = providers_for_cap[0].verification(cap)
+                evidence = {
+                    "verified": "[green]verified[/green]",
+                    "unverified": "[yellow]UNVERIFIED[/yellow]",
+                    "unsupported": "[red]no equivalent[/red]",
+                }.get(level, level)
+            t.add_row(cap.value, kind, shown, evidence)
         console.print(t)
         unrouted = [c.value for c in Capability if router.owner_of(c) is None]
         if unrouted:

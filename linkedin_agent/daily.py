@@ -150,7 +150,18 @@ def run_daily(
         # who is now 1st-degree accepted the invite — flip them to `connected`
         # so step 5 (dm1) drafts a follow-up in the SAME run. Only runs when
         # Unipile creds are configured; tests with fake adapter skip this.
-        if cfg.unipile_api_key and cfg.unipile_account_id and cfg.unipile_dsn:
+        # Gate on capability, not on one vendor's credentials: whether we can
+        # detect acceptances is a question about the configured providers, and
+        # asking about Unipile keys specifically stopped meaning anything when
+        # Unipile was removed.
+        from .providers import Capability, build_router
+        try:
+            _probe = build_router(cfg)
+            _can_check = bool(_probe.owner_of(Capability.ACCEPTANCE_CHECK))
+            _probe.close()
+        except Exception:
+            _can_check = False
+        if _can_check:
             try:
                 from .enrichment import check_acceptances
                 accept_result = check_acceptances(cfg)

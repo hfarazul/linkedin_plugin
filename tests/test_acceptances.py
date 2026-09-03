@@ -1,5 +1,12 @@
 """Tests for the connection-acceptance detection flow.
 
+Retargeted when Unipile was removed. These previously mocked Unipile's
+/users/{id} endpoint with respx; the assertions were always about pipeline
+behaviour — 1st-degree flips a prospect to 'connected', anything else leaves
+it alone — so they now run against a fake provider through the capability
+router instead of a transport that no longer exists.
+
+
 When someone accepts our connection invite, LinkedIn doesn't surface it via
 the messages endpoint — so the cron has to actively poll profile-distance
 for every prospect in `connection_sent` status. This file covers:
@@ -11,9 +18,9 @@ for every prospect in `connection_sent` status. This file covers:
 
 from __future__ import annotations
 
-import httpx
 import pytest
-import respx
+
+from tests.fakes import FakeProvider, fake_router
 
 
 def _cfg(**overrides):
@@ -52,20 +59,14 @@ def _seed_connection_sent(provider_id="ACoTEST123"):
 # ===== detection rule ======================================================
 
 @pytest.mark.integration
-@respx.mock
 def test_check_acceptances_flips_first_degree_to_connected(db_env):
     """A prospect whose API response now shows FIRST_DEGREE moves to 'connected'."""
     from linkedin_agent import db, enrichment
     pid = _seed_connection_sent(provider_id="ACoFIRSTDEG")
 
-    respx.get("https://api21.unipile.com:15165/api/v1/users/ACoFIRSTDEG").mock(
-        return_value=httpx.Response(200, json={
-            "network_distance": "FIRST_DEGREE",
-            "headline": "Test", "follower_count": 100,
-        })
-    )
+    provider = FakeProvider(accepted=True)
 
-    result = enrichment.check_acceptances(_cfg())
+    result = enrichment.check_acceptances(_cfg(), router=fake_router(provider))
 
     assert result.detected == 1
     assert result.still_pending == 0
@@ -73,20 +74,14 @@ def test_check_acceptances_flips_first_degree_to_connected(db_env):
 
 
 @pytest.mark.integration
-@respx.mock
 def test_check_acceptances_leaves_still_pending_alone(db_env):
     """A prospect still at 2nd-degree stays in 'connection_sent'."""
     from linkedin_agent import db, enrichment
     pid = _seed_connection_sent(provider_id="ACoSTILLPND")
 
-    respx.get("https://api21.unipile.com:15165/api/v1/users/ACoSTILLPND").mock(
-        return_value=httpx.Response(200, json={
-            "network_distance": "SECOND_DEGREE",
-            "headline": "Test",
-        })
-    )
+    provider = FakeProvider(accepted=False)
 
-    result = enrichment.check_acceptances(_cfg())
+    result = enrichment.check_acceptances(_cfg(), router=fake_router(provider))
 
     assert result.detected == 0
     assert result.still_pending == 1
@@ -94,8 +89,8 @@ def test_check_acceptances_leaves_still_pending_alone(db_env):
 
 
 @pytest.mark.integration
-@respx.mock
 def test_check_acceptances_skips_prospects_without_provider_id(db_env):
+    provider = FakeProvider(accepted=True)
     """No provider_id → can't look them up → skip silently (don't error)."""
     from linkedin_agent import db, enrichment
     pid = db.upsert_prospect(
@@ -106,7 +101,7 @@ def test_check_acceptances_skips_prospects_without_provider_id(db_env):
         conn.execute("UPDATE prospects SET status='connection_sent' WHERE id=?", (pid,))
 
     # No mocks set — if we tried to fetch, respx would fail.
-    result = enrichment.check_acceptances(_cfg())
+    result = enrichment.check_acceptances(_cfg(), router=fake_router(provider))
 
     assert result.detected == 0
     assert result.still_pending == 0
@@ -114,17 +109,14 @@ def test_check_acceptances_skips_prospects_without_provider_id(db_env):
 
 
 @pytest.mark.integration
-@respx.mock
 def test_check_acceptances_logs_accept_detected_action(db_env):
     """Detected acceptance writes an 'accept_detected' row in the action log."""
     from linkedin_agent import db, enrichment
     pid = _seed_connection_sent(provider_id="ACoLOGTEST")
 
-    respx.get("https://api21.unipile.com:15165/api/v1/users/ACoLOGTEST").mock(
-        return_value=httpx.Response(200, json={"network_distance": "FIRST_DEGREE"})
-    )
+    provider = FakeProvider(accepted=True)
 
-    enrichment.check_acceptances(_cfg())
+    enrichment.check_acceptances(_cfg(), router=fake_router(provider))
 
     with db.connect() as conn:
         rows = conn.execute(
@@ -137,20 +129,19 @@ def test_check_acceptances_logs_accept_detected_action(db_env):
 # ===== daily.py integration ================================================
 
 @pytest.mark.integration
-@respx.mock
-def test_daily_runs_acceptance_check_and_drafts_dm1_same_cycle(db_env, fake_telegram):
+def test_daily_runs_acceptance_check_and_drafts_dm1_same_cycle(db_env, fake_telegram, monkeypatch):
     """End-to-end: a prospect in connection_sent gets detected as accepted,
     flipped to 'connected', and the SAME daily run drafts a DM1 for them."""
     from linkedin_agent import daily as daily_mod, db
     from linkedin_agent.adapters import get_adapter
     pid = _seed_connection_sent(provider_id="ACoDAILYINT")
 
-    respx.get("https://api21.unipile.com:15165/api/v1/users/ACoDAILYINT").mock(
-        return_value=httpx.Response(200, json={"network_distance": "FIRST_DEGREE"})
-    )
-    respx.get("https://api21.unipile.com:15165/api/v1/messages").mock(
-        return_value=httpx.Response(200, json={"items": [], "cursor": None})
-    )
+    # The fake backend serves the adapter; the router (built inside daily)
+    # serves the acceptance check, which the fake provider answers.
+    provider = FakeProvider(accepted=True)
+    for target in ("linkedin_agent.providers.build_router",
+                   "linkedin_agent.enrichment.build_router"):
+        monkeypatch.setattr(target, lambda cfg, **kw: fake_router(provider))
 
     def stub_drafter(kind, prospect_id, recent_posts=None):
         return f"stub-{kind} body that meets the minimum length for a draft, padded with extra words to clear the 350-char DM1 minimum. " * 4

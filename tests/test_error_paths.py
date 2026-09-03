@@ -123,21 +123,28 @@ def test_unipile_send_connection_handles_422():
         adapter.close()
 
 
-# ===== daily.py resilience under Unipile failure ============================
+# ===== daily.py resilience under provider failure ===========================
 
 @pytest.mark.integration
-@respx.mock
-def test_daily_continues_after_unipile_search_500(db_env, fake_telegram):
+def test_daily_continues_after_inbox_provider_failure(db_env, fake_telegram, monkeypatch):
     """daily.poll catches errors and records them — does NOT crash the
     rest of the daily cycle (react/connect/dm steps for OTHER prospects
-    should still run)."""
+    should still run).
+
+    Retargeted from a Unipile 500 to a provider-level failure when Unipile was
+    removed; the property under test is daily's resilience, not the transport.
+    """
     import sqlite3
     from linkedin_agent import db, daily as daily_mod
+    from linkedin_agent.providers.base import MalformedResponse
+    from tests.fakes import FakeProvider, fake_router
 
-    # Mock Unipile /messages to always 500 (poll will fail).
-    respx.get("https://api21.unipile.com:15165/api/v1/messages").mock(
-        return_value=httpx.Response(500, json={"error": "down"})
-    )
+    broken = FakeProvider(raises=MalformedResponse("inbox scrape returned garbage"))
+    for target in ("linkedin_agent.providers.build_router",
+                   "linkedin_agent.poll.build_router",
+                   "linkedin_agent.enrichment.build_router"):
+        monkeypatch.setattr(target, lambda cfg, **kw: fake_router(broken),
+                            raising=False)
 
     cfg = _cfg()
     # Use the fake adapter for the LinkedIn operations (search/react/connect/dm)
@@ -203,7 +210,7 @@ def test_telegram_send_message_network_error_raises():
 
 @pytest.mark.integration
 @respx.mock
-def test_poll_handles_telegram_notification_failure_gracefully(db_env):
+def test_poll_handles_telegram_notification_failure_gracefully(db_env, monkeypatch):
     """If polling found new inbound but Telegram is down, the inbound is
     still recorded in DB — Telegram failure doesn't roll back the work."""
     import sqlite3
@@ -216,19 +223,15 @@ def test_poll_handles_telegram_notification_failure_gracefully(db_env):
         provider_id="ACoTESTNOTIFY",
     )
 
-    # Unipile returns one new inbound message
-    respx.get("https://api21.unipile.com:15165/api/v1/messages").mock(
-        return_value=httpx.Response(200, json={
-            "items": [{
-                "id": "msg-external-1",
-                "is_sender": False,
-                "sender_id": "ACoTESTNOTIFY",
-                "text": "Hi, thanks for the connect.",
-                "chat_id": "chat-1",
-            }],
-            "cursor": None,
-        })
-    )
+    # The provider returns one new inbound message.
+    from linkedin_agent.providers.capabilities import InboundMessage
+    from tests.fakes import FakeProvider, fake_router
+    provider = FakeProvider(inbox=[InboundMessage(
+        external_id="msg-external-1", prospect_provider_id="ACoTESTNOTIFY",
+        body="Hi, thanks for the connect.", sent_at="2026-09-02T10:00:00Z",
+        thread_id="chat-1", is_from_me=False, source="phantombuster")])
+    monkeypatch.setattr("linkedin_agent.poll.build_router",
+                        lambda cfg, **kw: fake_router(provider), raising=False)
     # Telegram is down
     respx.post("https://api.telegram.org/bottest-token/sendMessage").mock(
         return_value=httpx.Response(503, json={"ok": False, "description": "telegram down"})

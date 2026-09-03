@@ -1,4 +1,12 @@
-"""Tests for the poll module's auto-reply drafting wiring.
+"""Retargeted when Unipile was removed.
+
+These previously mocked Unipile's /messages endpoint with respx. The
+assertions were always about the reply workflow — inbound lands, a reply is
+drafted, Telegram gets the card, and a drafter failure degrades to a plain
+notification — so they now run against a fake provider through the capability
+router instead of a transport that no longer exists.
+
+Tests for the poll module's auto-reply drafting wiring.
 
 When a new inbound message comes in, poll_once should:
   1. Insert the inbound into the messages table.
@@ -11,11 +19,9 @@ When a new inbound message comes in, poll_once should:
 
 from __future__ import annotations
 
-import httpx
 import pytest
-import respx
 
-from tests.fakes import FakeTelegramClient
+from tests.fakes import FakeProvider, FakeTelegramClient, fake_router
 
 # Note: poll.py does `from .telegram import TelegramClient` at module load
 # time. To inject the fake, we patch `linkedin_agent.poll.TelegramClient`
@@ -57,12 +63,12 @@ def _stub_drafter_insufficient(kind, prospect_id, recent_posts=None):
 
 
 @pytest.mark.integration
-@respx.mock
 def test_poll_auto_drafts_reply_on_new_inbound(db_env, monkeypatch):
     """End-to-end: an inbound message lands → poll invokes the drafter →
     a pending_drafts row is created with kind='reply' → Telegram gets the
     draft card (with inbound embedded), not just a plain notify."""
     from linkedin_agent import db, poll as poll_mod, telegram as tg_mod
+    from linkedin_agent.providers.capabilities import InboundMessage
 
     pid = db.upsert_prospect(
         linkedin_url="https://www.linkedin.com/in/auto-draft-test",
@@ -71,18 +77,11 @@ def test_poll_auto_drafts_reply_on_new_inbound(db_env, monkeypatch):
         provider_id="ACoAUTODRAFT",
     )
 
-    respx.get("https://api21.unipile.com:15165/api/v1/messages").mock(
-        return_value=httpx.Response(200, json={
-            "items": [{
-                "id": "msg-1",
-                "is_sender": False,
-                "sender_id": "ACoAUTODRAFT",
-                "text": "Thanks for connecting — happy to chat.",
-                "chat_id": "chat-1",
-            }],
-            "cursor": None,
-        })
-    )
+    provider = FakeProvider(inbox=[InboundMessage(
+        external_id="msg-1", prospect_provider_id="ACoAUTODRAFT",
+        body="Thanks for connecting — happy to chat.",
+        sent_at="2026-09-02T10:00:00Z", thread_id="chat-1",
+        is_from_me=False, source="phantombuster")])
 
     # Replace the real TelegramClient with our fake; we don't want HTTP to TG.
     fake_tg = FakeTelegramClient(_cfg())
@@ -90,7 +89,7 @@ def test_poll_auto_drafts_reply_on_new_inbound(db_env, monkeypatch):
     # reference, not the source module.
     monkeypatch.setattr(poll_mod, "TelegramClient", lambda c: fake_tg)
 
-    result = poll_mod.poll_once(_cfg(), notify=True, drafter=_stub_drafter_ok)
+    result = poll_mod.poll_once(_cfg(), router=fake_router(provider), notify=True, drafter=_stub_drafter_ok)
 
     assert result.new_inbound == 1
     # Status flipped
@@ -109,12 +108,12 @@ def test_poll_auto_drafts_reply_on_new_inbound(db_env, monkeypatch):
 
 
 @pytest.mark.integration
-@respx.mock
 def test_poll_falls_back_to_notify_when_drafter_fails(db_env, monkeypatch):
     """If the drafter raises (e.g. INSUFFICIENT_CONTEXT or claude error), poll
     still records the inbound and falls back to the plain notify_reply alert
     so the user is informed something landed."""
     from linkedin_agent import db, poll as poll_mod, telegram as tg_mod
+    from linkedin_agent.providers.capabilities import InboundMessage
 
     pid = db.upsert_prospect(
         linkedin_url="https://www.linkedin.com/in/fallback-test",
@@ -122,25 +121,18 @@ def test_poll_falls_back_to_notify_when_drafter_fails(db_env, monkeypatch):
         provider_id="ACoFALLBACK",
     )
 
-    respx.get("https://api21.unipile.com:15165/api/v1/messages").mock(
-        return_value=httpx.Response(200, json={
-            "items": [{
-                "id": "msg-2",
-                "is_sender": False,
-                "sender_id": "ACoFALLBACK",
-                "text": "ok",   # too sparse for the drafter to work with
-                "chat_id": "chat-2",
-            }],
-            "cursor": None,
-        })
-    )
+    provider = FakeProvider(inbox=[InboundMessage(
+        external_id="msg-1", prospect_provider_id="ACoFALLBACK",
+        body="ok",
+        sent_at="2026-09-02T10:00:00Z", thread_id="chat-1",
+        is_from_me=False, source="phantombuster")])
 
     fake_tg = FakeTelegramClient(_cfg())
     # poll.py does `from .telegram import TelegramClient` — patch the imported
     # reference, not the source module.
     monkeypatch.setattr(poll_mod, "TelegramClient", lambda c: fake_tg)
 
-    result = poll_mod.poll_once(_cfg(), notify=True, drafter=_stub_drafter_insufficient)
+    result = poll_mod.poll_once(_cfg(), router=fake_router(provider), notify=True, drafter=_stub_drafter_insufficient)
 
     assert result.new_inbound == 1
     # No draft created
@@ -153,11 +145,11 @@ def test_poll_falls_back_to_notify_when_drafter_fails(db_env, monkeypatch):
 
 
 @pytest.mark.integration
-@respx.mock
 def test_poll_skips_drafting_when_disabled(db_env, monkeypatch):
     """draft_replies=False reverts to legacy notify-only behavior. Used by
     tests / by anyone who wants to keep the drafter out of the poll loop."""
     from linkedin_agent import db, poll as poll_mod, telegram as tg_mod
+    from linkedin_agent.providers.capabilities import InboundMessage
 
     db.upsert_prospect(
         linkedin_url="https://www.linkedin.com/in/disabled-test",
@@ -165,18 +157,11 @@ def test_poll_skips_drafting_when_disabled(db_env, monkeypatch):
         provider_id="ACoDISABLED",
     )
 
-    respx.get("https://api21.unipile.com:15165/api/v1/messages").mock(
-        return_value=httpx.Response(200, json={
-            "items": [{
-                "id": "msg-3",
-                "is_sender": False,
-                "sender_id": "ACoDISABLED",
-                "text": "Real substantive reply.",
-                "chat_id": "chat-3",
-            }],
-            "cursor": None,
-        })
-    )
+    provider = FakeProvider(inbox=[InboundMessage(
+        external_id="msg-1", prospect_provider_id="ACoDISABLED",
+        body="Real substantive reply.",
+        sent_at="2026-09-02T10:00:00Z", thread_id="chat-1",
+        is_from_me=False, source="phantombuster")])
 
     fake_tg = FakeTelegramClient(_cfg())
     # poll.py does `from .telegram import TelegramClient` — patch the imported
@@ -187,7 +172,7 @@ def test_poll_skips_drafting_when_disabled(db_env, monkeypatch):
     def forbidden(*args, **kwargs):
         raise AssertionError("drafter should not run when draft_replies=False")
 
-    result = poll_mod.poll_once(_cfg(), notify=True, draft_replies=False, drafter=forbidden)
+    result = poll_mod.poll_once(_cfg(), router=fake_router(provider), notify=True, draft_replies=False, drafter=forbidden)
 
     assert result.new_inbound == 1
     # No draft pushed, but plain notify happened

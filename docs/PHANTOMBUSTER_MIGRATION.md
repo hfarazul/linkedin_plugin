@@ -8,9 +8,12 @@ testing has since overturned.
 PhantomBuster), not a technical gap. Recorded because it shapes the priority:
 capability parity matters more than capability improvement.
 
-**Architecture:** PhantomBuster is the PRIMARY provider. Unipile is FALLBACK
-for explicitly documented, verified capability gaps only. Routing is per
-capability (`linkedin_agent/providers/router.py`), never per provider.
+**Architecture:** PhantomBuster is the ONLY provider. Unipile was removed on
+2026-09-03 after its connected LinkedIn account was disconnected on Unipile's
+side (`HTTP 401 errors/disconnected_account`) — the fallback had already
+stopped serving anything. Routing remains per capability
+(`linkedin_agent/providers/router.py`) so a second provider can be added
+without touching call sites.
 
 Last updated: 2026-09-02
 
@@ -161,11 +164,15 @@ back to Unipile with a router capability override.
       LinkedIn message is returned by the real Inbox Scraper and passes
       through normalization → provider-ID matching → persistence →
       Telegram draft workflow. Run `scripts/smoke_pb_inbox.py --expect-from`.
-- [ ] **PB-9** Migrate discovery call sites (`search`, `search-posts`, `funding_lookup`)
-- [ ] **PB-10** Migrate writes (react/connect/DM) — **blocked on T-7, T-8**
+- [x] **PB-9** Discovery call sites routed via `RouterAdapter`
+- [x] **PB-10** Writes routed via `RouterAdapter`. **Still unverified** —
+      T-7/T-8 remain open, so writes return `status="unknown"` and the
+      actions log records `dispatched:unconfirmed:<provider>:<container>`
+      rather than claiming delivery.
 - [x] **PB-11** Async job table for cron-safe batch execution
       (`research_jobs` table, `research_jobs.py`, `linkedin jobs [--collect]`)
-- [ ] **PB-12** Flip defaults to PhantomBuster-primary; Unipile fallback only
+- [x] **PB-12** PhantomBuster is the default and only provider; requesting
+      `unipile` raises with a pointer to this document
 
 ---
 
@@ -215,3 +222,30 @@ would treat a password.
 This is a structural difference from Unipile, which holds the session on its
 own side and never returns it. It is the concrete form of the ban/credential
 risk noted when the provider decision was made.
+
+
+---
+
+## 7. Unipile removal — what was lost
+
+Removed 2026-09-03. `linkedin_agent/providers/unipile.py` and
+`adapters/unipile_adapter.py` remain in the tree for their tests and as the
+reference for Unipile's date format, but neither is routable: `build_router`
+raises if asked for `unipile`.
+
+| Lost | Impact | Mitigation |
+|---|---|---|
+| **Post/content search** | `search-posts` is unroutable. The `non-tech-founder-mvp` campaign sourced prospects by what they *wrote*, which is a better signal than headline matching. | None today. Search Export documents a Content/Posts mode behind advanced setup (task T-3); until its output shape is verified this capability has no provider. |
+| **Structured action errors** | `cooldown_until` depended on `422 errors/already_invited_recently`. Without it we cannot detect LinkedIn's 2-3 week re-invite block. | Track cooldown locally from our own invite history, or use Sent Request Extractor. Not yet built. |
+| **Fallback for verified reads** | A PhantomBuster outage now stops the pipeline rather than degrading it. | Accepted: the fallback was already dead. |
+
+**Five capabilities are enabled but unverified** — `search_people`,
+`recent_posts`, `react`, `connect`, `send_dm`. While a fallback existed,
+gating them off routed around them; with one provider it would simply break
+the pipeline, so they are served and their status is surfaced by
+`linkedin providers` under the `evidence` column.
+
+The safety property moved rather than disappeared: an unverified write returns
+`ActionResult(status="unknown")`, and `RouterAdapter._result_string` writes
+`dispatched:unconfirmed:...` to the actions log rather than a value that would
+read as confirmed delivery.

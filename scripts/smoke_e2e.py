@@ -97,7 +97,7 @@ def main() -> int:
     from linkedin_agent.adapters.base import ProspectHit
 
     cfg = load_config()
-    primary = os.getenv("LINKEDIN_PRIMARY_PROVIDER", "unipile")
+    primary = os.getenv("LINKEDIN_PRIMARY_PROVIDER", "phantombuster")
     fallback = os.getenv("LINKEDIN_FALLBACK_PROVIDER") or None
 
     final_email: dict | None = None
