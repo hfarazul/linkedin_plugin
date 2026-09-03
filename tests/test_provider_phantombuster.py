@@ -349,3 +349,77 @@ def test_write_returns_unknown_not_sent(monkeypatch) -> None:
     assert result.status == "unknown"
     assert result.is_definitive is False
     assert result.provider == "phantombuster"
+
+
+# ===== identity guard =======================================================
+#
+# A Phantom runs with its SAVED arguments. An override we send is merged, not
+# authoritative, and an argument the Phantom does not recognise is dropped
+# silently — it then scrapes whatever it was configured with and writes to the
+# same result file. Observed 2026-09-03: a request for
+# emmanuelle-habert-1016b0162 returned Anjan B, and every downstream stage
+# reported success on the wrong human.
+
+from linkedin_agent.providers.phantombuster import _match_requested
+
+
+@pytest.mark.unit
+def test_matches_by_slug() -> None:
+    facts = _match_requested([PROFILE_ROW], "anjan-b-35a884295")
+    assert facts is not None and facts.full_name == "Anjan B"
+
+
+@pytest.mark.unit
+def test_matches_by_full_url() -> None:
+    assert _match_requested(
+        [PROFILE_ROW], "https://www.linkedin.com/in/anjan-b-35a884295/") is not None
+
+
+@pytest.mark.unit
+def test_matches_by_provider_id() -> None:
+    assert _match_requested(
+        [PROFILE_ROW], "ACoAAEd_lPYBmH1En5MdiTMq4m7soEpUXd6QBQ8") is not None
+
+
+@pytest.mark.unit
+def test_wrong_person_is_not_matched() -> None:
+    """The actual production bug: a well-formed row for somebody else."""
+    assert _match_requested([PROFILE_ROW], "emmanuelle-habert-1016b0162") is None
+
+
+@pytest.mark.unit
+def test_never_matches_by_position() -> None:
+    """Slot zero is always populated even when our input was ignored, so
+    position must never stand in for identity."""
+    other = {**PROFILE_ROW, "linkedinProfileSlug": "someone-else",
+             "profileUrl": "https://www.linkedin.com/in/someone-else",
+             "linkedinProfileUrn": "ACoOTHER000000000000"}
+    assert _match_requested([other], "anjan-b-35a884295") is None
+
+
+@pytest.mark.unit
+def test_finds_the_right_row_in_a_multi_row_result() -> None:
+    other = {**PROFILE_ROW, "linkedinProfileSlug": "someone-else",
+             "profileUrl": "https://www.linkedin.com/in/someone-else",
+             "linkedinProfileUrn": "ACoOTHER000000000000", "firstName": "Someone"}
+    facts = _match_requested([other, PROFILE_ROW], "anjan-b-35a884295")
+    assert facts is not None and facts.full_name == "Anjan B"
+
+
+@pytest.mark.unit
+def test_fetch_profile_raises_rather_than_returning_the_wrong_person(monkeypatch) -> None:
+    from linkedin_agent.providers.base import MalformedResponse
+    from linkedin_agent.providers.pb_jobs import JobResult
+
+    class FakeJobs:
+        def run(self, agent, args, timeout=None):
+            return JobResult(container_id="c1", status="finished",
+                             rows=[PROFILE_ROW])   # the WRONG person
+
+        def close(self): pass
+
+    monkeypatch.setenv("PHANTOMBUSTER_API_KEY", "k" * 20)
+    monkeypatch.setenv("PHANTOMBUSTER_AGENT_PROFILE_SCRAPER", "123")
+    provider = PhantomBusterProvider(_Cfg(), jobs=FakeJobs())
+    with pytest.raises(MalformedResponse, match="asked for"):
+        provider.fetch_profile("emmanuelle-habert-1016b0162")

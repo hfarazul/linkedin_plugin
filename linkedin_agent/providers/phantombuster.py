@@ -250,6 +250,40 @@ def inbound_from_row(row: dict) -> InboundMessage | None:
     )
 
 
+def _identity_tokens(value: str | None) -> set[str]:
+    """Comparable identity tokens from a URL, slug or provider id."""
+    if not value:
+        return set()
+    text = str(value).strip().rstrip("/").lower()
+    tokens = {text}
+    if "/" in text:
+        tokens.add(text.rsplit("/", 1)[-1])
+    provider_id = extract_provider_id(str(value))
+    if provider_id:
+        tokens.add(provider_id.lower())
+    return {t for t in tokens if t}
+
+
+def _match_requested(rows: list, identifier: str) -> ProfileFacts | None:
+    """Return the row that actually corresponds to `identifier`, or None.
+
+    Matching is by public slug or ACoAA id — never by position in the result
+    list, because a Phantom that ignored our input still returns a well-formed
+    row in slot zero.
+    """
+    wanted = _identity_tokens(identifier)
+    if not wanted:
+        return None
+    for row in rows:
+        candidate = _identity_tokens(row.get("linkedinProfileSlug"))
+        candidate |= _identity_tokens(row.get("profileUrl"))
+        candidate |= _identity_tokens(row.get("linkedinProfileUrl"))
+        candidate |= _identity_tokens(row.get("linkedinProfileUrn"))
+        if wanted & candidate:
+            return profile_from_row(row)
+    return None
+
+
 def prospect_hit_from_row(row: dict) -> ProspectHit | None:
     """Map a Search Export / Profile Scraper row onto the existing ProspectHit
     so discovery call sites keep working unchanged."""
@@ -339,7 +373,29 @@ class PhantomBusterProvider(CapabilityProvider):
         result = self.jobs().run(agent, {"spreadsheetUrl": url})
         if not result.rows:
             return None
-        return profile_from_row(result.rows[0])
+
+        # Identity guard. A Phantom runs with SAVED arguments; an override we
+        # send is merged, not authoritative, and an argument the Phantom does
+        # not recognise is ignored silently. It then scrapes whatever it was
+        # configured with and writes to the same result file — so a request for
+        # one person can return another, with every downstream stage reporting
+        # success on the wrong human.
+        #
+        # Observed on 2026-09-03: asking for emmanuelle-habert-1016b0162
+        # returned Anjan B, the agent's previously configured target. Nothing
+        # in the pipeline noticed, because nothing was comparing.
+        facts = _match_requested(result.rows, identifier)
+        if facts is None:
+            returned = ", ".join(
+                str(r.get("linkedinProfileSlug") or r.get("profileUrl") or "?")
+                for r in result.rows[:3])
+            raise MalformedResponse(
+                f"asked for {identifier!r} but the Phantom returned {returned!r}. "
+                f"The agent ran with its own saved input rather than ours — "
+                f"check that the Profile Scraper accepts a per-run profile URL, "
+                f"and that its saved argument is not pinned to a fixed list.",
+                provider=self.name)
+        return facts
 
     def check_acceptance(self, identifier: str) -> bool | None:
         facts = self.fetch_profile(identifier)
