@@ -562,3 +562,35 @@ def test_surveillance_gate_does_not_apply_to_linkedin_kinds(monkeypatch) -> None
     monkeypatch.setattr(d, "build_input", lambda kind, pid, recent_posts=None, evidence=None:
                         d.DrafterInput(kind=kind, campaign={}, prospect={}))
     assert d.draft("dm1", 1) == body_with_date
+
+
+# ---------------------------- subprocess encoding ----------------------------
+
+@pytest.mark.unit
+def test_drafter_output_is_decoded_as_utf8(monkeypatch) -> None:
+    """The first live drafter run returned "Vincent a EUR" mojibake where an
+    em-dash should be: text=True decodes with the locale codec, cp1252 on
+    Windows, and the model emits UTF-8. That corruption lands in the draft
+    body, not the terminal — it would be stored, approved, and mailed.
+    """
+    import linkedin_agent.drafter as d
+
+    captured = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = "Vincent \u2014 a note"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        captured.update(kwargs)
+        return _Proc()
+
+    monkeypatch.setattr(d.shutil, "which", lambda name: "/usr/bin/claude")
+    monkeypatch.setattr(d.subprocess, "run", fake_run)
+    out = d._invoke_claude("prompt")
+
+    assert captured.get("encoding") == "utf-8", \
+        "without an explicit codec the locale one is used"
+    assert captured.get("errors"), "an undecodable byte must not raise mid-draft"
+    assert "\u2014" in out

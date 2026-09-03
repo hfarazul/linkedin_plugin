@@ -353,6 +353,14 @@ def _invoke_claude(prompt: str, timeout: int = 90) -> str:
         [claude_bin, "-p", prompt, "--output-format", "text"],
         capture_output=True,
         text=True,
+        # The model emits UTF-8. Without this, text=True decodes with the
+        # locale codec — cp1252 on Windows — and the first live drafter run
+        # produced "Vincent â€”" where an em-dash should be. That corruption
+        # is in the draft body itself, not the terminal: it would be stored,
+        # approved on a phone, and mailed to a real person. Names with
+        # accents corrupt the same way.
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
         check=False,
         stdin=subprocess.DEVNULL,
