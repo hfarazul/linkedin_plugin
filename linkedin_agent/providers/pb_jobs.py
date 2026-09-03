@@ -103,12 +103,44 @@ class PhantomBusterJobs:
 
     # ------------------------------------------------------------- lifecycle
 
+    def configure(self, agent_id: str, arguments: dict) -> dict:
+        """Merge `arguments` into the agent's SAVED argument and persist it.
+
+        This is required, not an optimisation. A launch-time `argument` is
+        accepted by the API and then ignored: verified on 2026-09-03 by asking
+        a Profile Scraper for one profile and receiving the one it was
+        configured with, both as a JSON string and as an object. Only the saved
+        argument decides what a Phantom actually does.
+
+        Merging rather than replacing keeps the session cookie, user agent and
+        every other UI-configured setting intact — they are not in our payload
+        and overwriting them would break the agent.
+
+        CAUTION: this mutates shared state. Two runs retargeting the same agent
+        concurrently will clobber each other, and a human editing that Phantom
+        in the UI will see it change under them. Use an agent dedicated to
+        programmatic use.
+        """
+        detail = self._request("GET", "/agents/fetch", params={"id": str(agent_id)})
+        saved = detail.get("argument")
+        try:
+            merged = json.loads(saved) if isinstance(saved, str) else dict(saved or {})
+        except Exception:
+            merged = {}
+        merged.update(arguments)
+        self._request("POST", "/agents/save",
+                      json={"id": str(agent_id), "argument": json.dumps(merged)})
+        return merged
+
     def submit(self, agent_id: str, arguments: dict | None = None) -> str:
-        """Queue an agent. Returns the container id."""
-        payload: dict = {"id": str(agent_id)}
+        """Queue an agent. Returns the container id.
+
+        Any arguments are written to the agent's saved configuration first,
+        because the launch payload's own `argument` field does not take effect.
+        """
         if arguments:
-            # PhantomBuster expects the argument object JSON-encoded.
-            payload["argument"] = json.dumps(arguments)
+            self.configure(agent_id, arguments)
+        payload: dict = {"id": str(agent_id)}
         data = self._request("POST", "/agents/launch", json=payload)
         container_id = data.get("containerId") or data.get("data", {}).get("containerId")
         if not container_id:
