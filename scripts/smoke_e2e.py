@@ -313,7 +313,14 @@ def main() -> int:
                     context_bits.append(f"current: {cur.title} at {cur.company}")
                     if len(facts.positions) > 1:
                         prev = facts.positions[1]
-                        context_bits.append(f"previous: {prev.title} at {prev.company}")
+                        # positions[1] is whatever LinkedIn lists second, which
+                        # is not necessarily a role they have left. Anjan B
+                        # holds both concurrently, and calling dan Lab
+                        # "previous" would tell the drafter he used to
+                        # co-found a company he still co-founds.
+                        label = "also current" if prev.is_current else "previous"
+                        context_bits.append(
+                            f"{label}: {prev.title} at {prev.company}")
                 if facts.company_employee_count:
                     context_bits.append(f"company size: {facts.company_employee_count}")
                 quotable_posts = [p for p in posts if (p.text or "").strip()]
