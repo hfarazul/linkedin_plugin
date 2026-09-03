@@ -502,3 +502,242 @@ def test_missing_dates_are_never_a_direct_transition() -> None:
     assert is_direct_transition(_pos("A"), _pos("B", "2024-01-01")) is False
     assert is_direct_transition(_pos("A", "2020-01-01", "2022-01-01"),
                                 _pos("B")) is False
+
+
+# ===== activity extractor: authorship ======================================
+#
+# The Activity Extractor returns reposts alongside original posts. In a sample
+# of 20 real rows, 3 were reposts of other people's content, marked
+# action="<Name> reposted this" with authorUrl pointing at the original author.
+# The drafter treats these as "something you wrote", so quoting a repost back
+# attributes another person's words to the prospect.
+
+OWN_POST_ROW = {          # verbatim shape from agent 5153701994827074
+    "action": "Post",
+    "authorUrl": "https://www.linkedin.com/in/iamghazi",
+    "profileUrl": "https://www.linkedin.com/in/iamghazi/",
+    "postContent": "My latest workflow for building a side project with AI",
+    "postUrl": "https://www.linkedin.com/feed/update/urn:li:activity:749170470",
+    "postDate": "3w",
+    "postTimestamp": "2026-08-08T03:59:51.210Z",
+    "type": "Text",
+}
+REPOST_ROW = {
+    "action": "Ghazi Sultan reposted this",
+    "authorUrl": "https://www.linkedin.com/in/amjadmasad",     # someone else
+    "profileUrl": "https://www.linkedin.com/in/iamghazi/",
+    "postContent": "I was a pro gamer before I was a founder.",
+    "postUrl": "https://www.linkedin.com/feed/update/urn:li:activity:749170471",
+    "postTimestamp": "2026-08-01T00:00:00.000Z",
+    "type": "Image",
+}
+
+
+class _ActivityJobs:
+    def __init__(self, rows):
+        self._rows = rows
+        self.saved = None
+
+    def run(self, agent, args, timeout=None):
+        from linkedin_agent.providers.pb_jobs import JobResult
+        self.saved = args
+        return JobResult(container_id="c1", status="finished", rows=self._rows)
+
+    def close(self): pass
+
+
+def _activity_provider(monkeypatch, rows):
+    monkeypatch.setenv("PHANTOMBUSTER_API_KEY", "k" * 20)
+    monkeypatch.setenv("PHANTOMBUSTER_AGENT_ACTIVITY_EXTRACTOR", "555")
+    jobs = _ActivityJobs(rows)
+    return PhantomBusterProvider(_Cfg(), jobs=jobs), jobs
+
+
+@pytest.mark.unit
+def test_reposts_are_excluded_by_default(monkeypatch) -> None:
+    """The important one: another person's words must not be handed to the
+    drafter as the prospect's own."""
+    provider, _ = _activity_provider(monkeypatch, [REPOST_ROW, OWN_POST_ROW])
+    posts = provider.get_recent_posts("https://www.linkedin.com/in/iamghazi/", 5)
+    assert len(posts) == 1
+    assert posts[0].text.startswith("My latest workflow")
+
+
+@pytest.mark.unit
+def test_reposts_can_be_requested_explicitly(monkeypatch) -> None:
+    provider, _ = _activity_provider(monkeypatch, [REPOST_ROW, OWN_POST_ROW])
+    posts = provider.get_recent_posts("https://www.linkedin.com/in/iamghazi/", 5,
+                                      include_reposts=True)
+    assert len(posts) == 2
+
+
+@pytest.mark.unit
+def test_author_url_is_the_real_author_not_the_prospect(monkeypatch) -> None:
+    """So a caller can always tell whose words these are."""
+    provider, _ = _activity_provider(monkeypatch, [REPOST_ROW])
+    posts = provider.get_recent_posts("https://www.linkedin.com/in/iamghazi/", 5,
+                                      include_reposts=True)
+    assert posts[0].author_url == "https://www.linkedin.com/in/amjadmasad"
+
+
+@pytest.mark.unit
+def test_uses_the_iso_timestamp_not_the_relative_date(monkeypatch) -> None:
+    """postDate is '3w'; only postTimestamp can be compared or stored."""
+    provider, _ = _activity_provider(monkeypatch, [OWN_POST_ROW])
+    posts = provider.get_recent_posts("https://www.linkedin.com/in/iamghazi/", 5)
+    assert posts[0].posted_at == "2026-08-08T03:59:51.210Z"
+
+
+@pytest.mark.unit
+def test_targets_the_profile_with_the_verified_argument_name(monkeypatch) -> None:
+    """The Extractor takes spreadsheetUrl, not profileUrls. An unrecognised
+    key would be merged into the saved argument and silently ignored, and the
+    Phantom would scrape whoever it was last pointed at."""
+    provider, jobs = _activity_provider(monkeypatch, [OWN_POST_ROW])
+    provider.get_recent_posts("https://www.linkedin.com/in/iamghazi/", 3)
+    assert jobs.saved["spreadsheetUrl"] == "https://www.linkedin.com/in/iamghazi/"
+    assert "profileUrls" not in jobs.saved
+
+
+@pytest.mark.unit
+def test_rows_without_a_post_url_are_skipped(monkeypatch) -> None:
+    provider, _ = _activity_provider(monkeypatch, [{"action": "Post",
+                                                    "postContent": "orphan"}])
+    assert provider.get_recent_posts("https://www.linkedin.com/in/iamghazi/", 5) == []
+
+
+# ---------------------- dedup: activity served from the CSV ------------------
+# The Activity Extractor deduplicates like the Profile Scraper. Observed live
+# on 2026-09-03 for iamghazi: the container finished in seconds having logged
+# "No new activity found", result.json came back with no rows for the profile,
+# and the 20 posts it had collected on an earlier run were only in result.csv.
+# Without a fallback the drafter loses every "something you wrote" hook the
+# second time a profile is touched.
+
+class _DedupActivityJobs(_ActivityJobs):
+    """result.json has nothing for us; the cumulative CSV does."""
+
+    def __init__(self, fresh_rows, cumulative_rows):
+        super().__init__(fresh_rows)
+        self._cumulative = cumulative_rows
+        self.fetch_all_calls = 0
+
+    def fetch_rows(self, agent):
+        return self._rows
+
+    def fetch_all_rows(self, agent):
+        self.fetch_all_calls += 1
+        return self._cumulative
+
+
+def _dedup_provider(monkeypatch, fresh, cumulative):
+    monkeypatch.setenv("PHANTOMBUSTER_API_KEY", "k" * 20)
+    monkeypatch.setenv("PHANTOMBUSTER_AGENT_ACTIVITY_EXTRACTOR", "555")
+    monkeypatch.setattr("linkedin_agent.providers.phantombuster.time.sleep",
+                        lambda _s: None)
+    jobs = _DedupActivityJobs(fresh, cumulative)
+    return PhantomBusterProvider(_Cfg(), jobs=jobs), jobs
+
+
+@pytest.mark.unit
+def test_empty_result_falls_back_to_the_cumulative_csv(monkeypatch) -> None:
+    provider, jobs = _dedup_provider(monkeypatch, [], [OWN_POST_ROW])
+    posts = provider.get_recent_posts("https://www.linkedin.com/in/iamghazi/", 5)
+    assert jobs.fetch_all_calls == 1
+    assert len(posts) == 1
+    assert posts[0].text.startswith("My latest workflow")
+
+
+@pytest.mark.unit
+def test_cumulative_csv_does_not_leak_another_prospects_posts(monkeypatch) -> None:
+    """The CSV accrues every profile the agent has ever scraped, and each of
+    those rows is 'own-authored' relative to its own profileUrl. Returning them
+    would attribute a stranger's post to this prospect."""
+    other = {
+        "profileUrl": "https://www.linkedin.com/in/someone-else/",
+        "authorUrl": "https://www.linkedin.com/in/someone-else",
+        "action": "Post",
+        "postContent": "A different person's post",
+        "postUrl": "https://www.linkedin.com/feed/update/urn:li:activity:111",
+        "postTimestamp": "2026-08-02T00:00:00.000Z",
+    }
+    provider, _ = _dedup_provider(monkeypatch, [], [other, OWN_POST_ROW])
+    posts = provider.get_recent_posts("https://www.linkedin.com/in/iamghazi/", 5)
+    assert [p.text for p in posts] == [OWN_POST_ROW["postContent"][:1000]]
+
+
+@pytest.mark.unit
+def test_no_fallback_when_the_fresh_scrape_already_has_our_rows(monkeypatch) -> None:
+    """A cache read costs an extra S3 fetch and returns older data; only take
+    it when the fresh result genuinely has nothing for this profile."""
+    provider, jobs = _dedup_provider(monkeypatch, [OWN_POST_ROW], [REPOST_ROW])
+    provider.get_recent_posts("https://www.linkedin.com/in/iamghazi/", 5)
+    assert jobs.fetch_all_calls == 0
+
+
+# ------------------------- company name fallback -----------------------------
+# Observed live for iamghazi: linkedinCompanyName came back "" while
+# companyName held "Pawp". The empty value reached the email as
+# "the work you are doing at ." and a subject line of " - shipping without
+# hiring a team".
+
+@pytest.mark.unit
+def test_blank_linkedin_company_name_falls_back_to_company_name() -> None:
+    facts = profile_from_row({
+        "linkedinJobTitle": "Founder",
+        "linkedinJobDateRange": "Feb 2026 - Present",
+        "linkedinCompanyName": "",
+        "companyName": "Pawp",
+    })
+    assert facts.positions[0].company == "Pawp"
+
+
+@pytest.mark.unit
+def test_company_slug_is_the_last_resort_not_a_guess() -> None:
+    facts = profile_from_row({
+        "linkedinJobTitle": "Founder",
+        "linkedinJobDateRange": "Feb 2026 - Present",
+        "linkedinCompanyName": "",
+        "linkedinCompanySlug": "pawp",
+    })
+    assert facts.positions[0].company == "pawp"
+
+
+@pytest.mark.unit
+def test_a_populated_company_name_is_never_overridden() -> None:
+    facts = profile_from_row({
+        "linkedinJobTitle": "Founder",
+        "linkedinJobDateRange": "Feb 2026 - Present",
+        "linkedinCompanyName": "Pawp Inc",
+        "companyName": "Pawp",
+    })
+    assert facts.positions[0].company == "Pawp Inc"
+
+
+@pytest.mark.unit
+def test_the_no_new_results_marker_is_not_mistaken_for_a_scrape(monkeypatch) -> None:
+    """Live result.json for an already-seen profile, 2026-09-03. It names the
+    right person, so a profile-only check reads it as a successful scrape and
+    returns nothing while the 20 real posts sit in the CSV."""
+    marker = {"profileUrl": "https://www.linkedin.com/in/iamghazi/",
+              "postUrl": "", "error": "No new results found",
+              "timestamp": "2026-09-03T11:33:36.343Z"}
+    provider, jobs = _dedup_provider(monkeypatch, [marker], [OWN_POST_ROW])
+    posts = provider.get_recent_posts("https://www.linkedin.com/in/iamghazi/", 5)
+    assert jobs.fetch_all_calls == 1
+    assert len(posts) == 1
+
+
+@pytest.mark.unit
+def test_the_marker_short_circuits_the_settle_wait(monkeypatch) -> None:
+    """The marker is the agent's final answer. Re-reading result.json five
+    times at four seconds apart cannot change it, and every profile in a batch
+    would pay that."""
+    marker = {"profileUrl": "https://www.linkedin.com/in/iamghazi/",
+              "postUrl": "", "error": "No new results found"}
+    provider, jobs = _dedup_provider(monkeypatch, [marker], [OWN_POST_ROW])
+    calls = []
+    monkeypatch.setattr(jobs, "fetch_rows",
+                        lambda a: (calls.append(a), [marker])[1])
+    provider.get_recent_posts("https://www.linkedin.com/in/iamghazi/", 5)
+    assert calls == []

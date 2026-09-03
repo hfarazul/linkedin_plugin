@@ -215,6 +215,43 @@ class PhantomBusterJobs:
         raise MalformedResponse(f"unexpected result type {type(data).__name__}",
                                 provider="phantombuster")
 
+    def fetch_all_rows(self, agent_id: str) -> list:
+        """The agent's CUMULATIVE result set, from result.csv.
+
+        result.json holds only the most recent launch. Several Phantoms
+        deduplicate against profiles they have already processed: the container
+        exits in seconds with "All leads have been processed", scrapes nothing,
+        and leaves the previous run's JSON in place. The data is not missing —
+        it is in the cumulative CSV, which accrues every row the agent has ever
+        produced.
+
+        Reading it turns a dead end into a cache hit, and avoids re-scraping a
+        profile we already paid for. The caller must still confirm the row is
+        the one it asked for, and should treat it as potentially stale.
+
+        The CSV is read as UTF-8 explicitly. PhantomBuster's CSV export has
+        been observed mis-encoded when read with a locale default, which would
+        corrupt names and headlines on the way into our database.
+        """
+        _, csv_url = self.result_urls(agent_id)
+        if not csv_url:
+            return []
+        try:
+            r = httpx.get(csv_url, timeout=60.0, follow_redirects=True)
+        except httpx.HTTPError as e:
+            raise ProviderTimeout(f"fetching cumulative results: {e}",
+                                  provider="phantombuster") from e
+        if r.status_code != 200 or not r.content:
+            return []
+        import csv
+        import io
+        text = r.content.decode("utf-8", errors="replace")
+        try:
+            return list(csv.DictReader(io.StringIO(text)))
+        except Exception as e:
+            raise MalformedResponse(f"result.csv unparseable: {e}",
+                                    provider="phantombuster") from e
+
     def console(self, agent_id: str) -> str:
         try:
             data = self._request("GET", "/agents/fetch-output",

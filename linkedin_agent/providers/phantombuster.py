@@ -18,6 +18,7 @@ import hashlib
 import logging
 import os
 import re
+import time
 from datetime import datetime
 
 from ..adapters.base import Post, ProspectHit
@@ -82,6 +83,13 @@ AGENT_ENV = {
 }
 
 _PROVIDER_ID_RE = re.compile(r"(ACo[A-Za-z0-9_\-]{10,})")
+
+# A finished container does not guarantee its result.json has landed in S3,
+# and that file is agent-scoped, so an early read serves the previous run's
+# rows. These bound how long we wait for the write to settle before treating
+# a mismatch as a genuine wrong-target failure.
+RESULT_SETTLE_ATTEMPTS = 5
+RESULT_SETTLE_SECONDS = 4
 
 # "Feb 2026 - Present", "Aug 2025 - Jan 2026", "2021 - 2023"
 _MONTHS = {m: i for i, m in enumerate(
@@ -171,6 +179,12 @@ def profile_from_row(row: dict) -> ProfileFacts:
          "linkedinPreviousJobDescription"),
     ):
         company = row.get(company_key)
+        if not company and company_key == "linkedinCompanyName":
+            # Observed blank on a real profile while companyName held "Pawp".
+            # A blank here renders as "the work you are doing at ." in an
+            # email, so fall back through every field that names the employer.
+            company = (row.get("companyName")
+                       or row.get("linkedinCompanySlug") or "")
         title = row.get(title_key)
         if not (company or title):
             continue
@@ -371,7 +385,43 @@ class PhantomBusterProvider(CapabilityProvider):
         url = identifier if identifier.startswith("http") else \
             f"https://www.linkedin.com/in/{identifier}"
         result = self.jobs().run(agent, {"spreadsheetUrl": url})
-        if not result.rows:
+
+        # A container can report "finished" before its result.json has landed
+        # in S3, and that file is agent-scoped — so an early read returns the
+        # PREVIOUS run's rows, for whoever was scraped last. Re-read a few
+        # times before believing it. Observed 2026-09-03: asking for
+        # 'iamghazi' returned 'vincent-picot-555744a', the prior target.
+        facts = _match_requested(result.rows, identifier) if result.rows else None
+        for _ in range(RESULT_SETTLE_ATTEMPTS):
+            if facts is not None:
+                break
+            time.sleep(RESULT_SETTLE_SECONDS)
+            try:
+                rows = self.jobs().fetch_rows(agent)
+            except Exception:
+                break
+            if rows:
+                result.rows = rows
+                facts = _match_requested(rows, identifier)
+
+        if facts is None:
+            # The Phantom deduplicates: if it has processed this profile
+            # before it exits in seconds with "All leads have been processed",
+            # scrapes nothing, and leaves the previous run's result.json. The
+            # row is still in the cumulative CSV, so a skip becomes a cache
+            # hit instead of a failure.
+            try:
+                cached = self.jobs().fetch_all_rows(agent)
+            except Exception:
+                cached = []
+            facts = _match_requested(cached, identifier) if cached else None
+            if facts is not None:
+                logger.info("profile %s served from the agent's cumulative "
+                            "results; the Phantom skipped it as already "
+                            "processed, so this data may be stale",
+                            identifier)
+
+        if not result.rows and facts is None:
             return None
 
         # Identity guard. A Phantom runs with SAVED arguments; an override we
@@ -384,7 +434,10 @@ class PhantomBusterProvider(CapabilityProvider):
         # Observed on 2026-09-03: asking for emmanuelle-habert-1016b0162
         # returned Anjan B, the agent's previously configured target. Nothing
         # in the pipeline noticed, because nothing was comparing.
-        facts = _match_requested(result.rows, identifier)
+        #
+        # `facts` is whatever the fresh result, the settle retries, or the
+        # cumulative CSV produced above — all three are legitimate sources, and
+        # only a miss in every one of them is a wrong-target failure.
         if facts is None:
             returned = ", ".join(
                 str(r.get("linkedinProfileSlug") or r.get("profileUrl") or "?")
@@ -432,22 +485,105 @@ class PhantomBusterProvider(CapabilityProvider):
             "phantombuster: post/content search not yet verified (task T-3)",
             provider=self.name)
 
-    def get_recent_posts(self, linkedin_url: str, limit: int = 5) -> list[Post]:
+    def get_recent_posts(self, linkedin_url: str, limit: int = 5,
+                         *, include_reposts: bool = False) -> list[Post]:
+        """The prospect's recent activity, filtered to what they actually wrote.
+
+        The Activity Extractor returns reposts alongside original posts. In a
+        sample of 20 rows, 3 were reposts of other people's content, marked
+        `action = "<Name> reposted this"` with `authorUrl` pointing at the
+        original author rather than the scraped profile.
+
+        Those are excluded by default. The drafter uses these as "something you
+        wrote" — quoting a repost back as the prospect's own thinking
+        attributes someone else's words to them, which is the same failure as
+        claiming a career move that never happened.
+        """
         agent = self._require_agent(Capability.RECENT_POSTS)
-        result = self.jobs().run(agent, {"profileUrls": linkedin_url,
-                                         "numberMaxOfPosts": limit})
+        # Verified argument names: the Extractor takes the target profile as
+        # `spreadsheetUrl`, exactly like the Profile Scraper.
+        result = self.jobs().run(agent, {"spreadsheetUrl": linkedin_url,
+                                         "numberMaxOfPosts": max(limit, 10)})
+        wanted = (linkedin_url or "").rstrip("/").lower()
+
+        def _is_ours(row: dict) -> bool:
+            return wanted in (row.get("profileUrl") or "").rstrip("/").lower()
+
+        def _usable(rows) -> bool:
+            """A row we can actually build a Post from.
+
+            Matching the profile is not enough. When the Extractor has already
+            seen a profile it writes a marker row instead of scraping:
+                {"profileUrl": "...", "postUrl": "", "error": "No new results found"}
+            That row names the right person, so a profile-only check reads it as
+            success and we return no posts while believing the scrape worked.
+            """
+            return any(_is_ours(r) and r.get("postUrl") for r in rows)
+
+        def _settled(rows) -> bool:
+            """True once re-reading result.json cannot tell us anything new.
+
+            The marker row is the agent's final answer, not a half-written
+            file, so waiting out the settle loop on it costs ~20s per profile
+            and changes nothing.
+            """
+            return any(_is_ours(r) and r.get("error") for r in rows)
+
+        # Same stale-read race as fetch_profile: wait for rows that actually
+        # belong to the profile we asked about.
+        for _ in range(RESULT_SETTLE_ATTEMPTS):
+            if _usable(result.rows) or _settled(result.rows):
+                break
+            time.sleep(RESULT_SETTLE_SECONDS)
+            try:
+                result.rows = self.jobs().fetch_rows(agent)
+            except Exception:
+                break
+        if not _usable(result.rows):
+            # Same dedup as the Profile Scraper. The posts are not gone — every
+            # one the agent has ever collected is in the cumulative CSV.
+            try:
+                cached = self.jobs().fetch_all_rows(agent)
+            except Exception:
+                cached = []
+            # That CSV holds every profile this agent has ever scraped, and each
+            # of those rows looks "own-authored" against its own profileUrl.
+            # Without this filter we would hand back another prospect's posts as
+            # this one's.
+            cached = [r for r in cached if _is_ours(r)]
+            if cached:
+                logger.info("activity for %s served from cumulative results "
+                            "(the Phantom found nothing new)", linkedin_url)
+                result.rows = cached
         posts: list[Post] = []
-        for row in result.rows[:limit]:
-            post_url = row.get("postUrl") or row.get("url")
+        for row in result.rows:
+            post_url = row.get("postUrl")
             if not post_url:
                 continue
+            author = (row.get("authorUrl") or "").rstrip("/").lower()
+            profile = (row.get("profileUrl") or "").rstrip("/").lower()
+            if profile and wanted not in profile:
+                continue
+            # Own content when the author is the scraped profile. `action`
+            # agrees ("Post" vs "... reposted this") and is used as a
+            # fallback for rows that omit authorUrl.
+            is_own = bool(author) and author in (profile or wanted, wanted)
+            if not is_own and str(row.get("action") or "").strip() == "Post":
+                is_own = True
+            if not is_own and not include_reposts:
+                continue
             posts.append(Post(
-                post_id=str(row.get("postId") or post_url),
+                post_id=str(post_url),
                 url=post_url,
-                author_url=linkedin_url,
-                text=(row.get("postContent") or row.get("text") or "")[:1000],
-                posted_at=row.get("postDate") or row.get("date"),
+                # The real author, so a caller can always tell whose words
+                # these are rather than assuming the prospect's.
+                author_url=row.get("authorUrl") or linkedin_url,
+                text=(row.get("postContent") or "")[:1000],
+                # postDate is relative ("3w"); postTimestamp is ISO.
+                posted_at=row.get("postTimestamp") or row.get("postDate"),
             ))
+            if len(posts) >= limit:
+                break
         return posts
 
     # ---------------------------------------------------------------- writes

@@ -253,7 +253,13 @@ def main() -> int:
                         posts = router.perform(Capability.RECENT_POSTS,
                                                "get_recent_posts", linkedin_url, 3)
                         st.note("posts_found", len(posts))
-                        for i, p in enumerate(posts[:2]):
+                        # A video or image post scrapes with no postContent.
+                        # It is a valid target for a reaction but gives the
+                        # drafter nothing to reference, so the two counts are
+                        # reported separately rather than as one number.
+                        quotable = [p for p in posts if (p.text or "").strip()]
+                        st.note("posts_with_text", len(quotable))
+                        for i, p in enumerate(quotable[:2]):
                             st.note(f"post_{i}", (p.text or "")[:100])
                         st.why("post text becomes drafter hook material")
                     except Exception as e:
@@ -273,8 +279,9 @@ def main() -> int:
                         context_bits.append(f"previous: {prev.title} at {prev.company}")
                 if facts.company_employee_count:
                     context_bits.append(f"company size: {facts.company_employee_count}")
-                if posts:
-                    context_bits.append(f"{len(posts)} recent post(s)")
+                quotable_posts = [p for p in posts if (p.text or "").strip()]
+                if quotable_posts:
+                    context_bits.append(f"{len(quotable_posts)} recent post(s)")
                 pitch_context = ". ".join(context_bits) or None
                 if pitch_context:
                     db.set_pitch_context(prospect_id, pitch_context) \
@@ -313,7 +320,10 @@ def main() -> int:
                     cur = facts.positions[0] if facts.positions else None
                     prev = facts.positions[1] if len(facts.positions) > 1 else None
                     first = (facts.full_name or "there").split()[0]
-                    now_co = cur.company if cur else "your new company"
+                    now_co = ((cur.company or "").strip() if cur else "")
+                    # A blank company renders as "at ." — say something
+                    # true instead of nothing.
+                    now_co = now_co or facts.company_name or "your company"
                     # Narrative, not database. The transition is described by
                     # what they built and where they went — never by dates or
                     # headcount, which read as surveillance in a cold email.
@@ -335,11 +345,19 @@ def main() -> int:
                     else:
                         # Fall back to what is certain: the current role.
                         move = f"the work you are doing at {now_co}"
+                    # The second paragraph used to open "Most founders at
+                    # that transition point" unconditionally. That asserted
+                    # a move the gate above had just rejected, and called
+                    # whoever we scraped a founder - this run produced it
+                    # for a Senior Python Engineer with a 4-month gap.
+                    # Both halves have to follow the evidence.
+                    opener = ("Most teams at that transition point"
+                              if direct else "Teams building at that stage")
                     body = (
                         f"Hi {first},\n\n"
                         f"We have yet to be properly introduced, but I'm Haque "
                         f"with Cortivo, and what caught my eye is {move}.\n\n"
-                        "Most founders at that transition point end up rebuilding "
+                        f"{opener} end up rebuilding "
                         "internal tooling and data pipelines by hand while the "
                         "product gets the attention. We would build the custom "
                         "systems that take that load off, tailored to how your "
@@ -444,9 +462,13 @@ def main() -> int:
 
 
 def _subject_for(facts) -> str:
+    company = ""
     if facts.positions:
-        cur = facts.positions[0]
-        return f"{cur.company} — shipping without hiring a team"
+        company = (facts.positions[0].company or "").strip()
+    company = company or (facts.company_name or "").strip()
+    # An empty subject line is worse than a generic one.
+    if company:
+        return f"{company} — shipping without hiring a team"
     return "Quick question about your build side"
 
 
