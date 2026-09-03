@@ -27,11 +27,40 @@ recorded, so a caller cannot forget to.
 from __future__ import annotations
 
 import re
+import sys
 import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Iterator
+
+
+def safe_text(value: str) -> str:
+    """Replace characters the attached console cannot encode.
+
+    Windows consoles default to cp1252, and a single emoji in a scraped post
+    is enough to raise UnicodeEncodeError out of print(). Observed 2026-09-03:
+    a prospect whose post contained U+1F4AF killed an otherwise healthy run at
+    stage 9, after the profile and activity scrapes had already been paid for.
+
+    Reconfiguring stdout to UTF-8 was tried earlier in this project and is
+    worse -- it moves the failure into whatever is reading our output.
+    Sanitising per write keeps the loss to the one character that cannot be
+    displayed, and only on terminals that cannot display it.
+    """
+    enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        value.encode(enc)
+        return value
+    except (UnicodeEncodeError, LookupError):
+        return value.encode(enc, errors="replace").decode(enc, errors="replace")
+
+
+def say(text: str = "") -> None:
+    """print() that cannot kill a run over an unprintable character."""
+    print(safe_text(str(text)))
+
+
 
 # ------------------------------------------------------------------ redaction
 
@@ -162,7 +191,7 @@ class RunTrace:
         self.steps.append(current)
         counter = f"{current.index:02d}/{self.total:02d}" if self.total else f"{current.index:02d}"
         if self.echo:
-            print(f"\n[{counter}] {name}" + (f"  ({mode})" if mode != LIVE else ""))
+            say(f"\n[{counter}] {name}" + (f"  ({mode})" if mode != LIVE else ""))
         start = time.monotonic()
         try:
             yield current
@@ -183,21 +212,21 @@ class RunTrace:
             rendered = value if isinstance(value, str) else repr(value)
             if len(str(rendered)) > 160:
                 rendered = str(rendered)[:157] + "..."
-            print(f"     {key}={rendered}")
+            say(f"     {key}={rendered}")
         if step.provider:
             line = f"     provider={step.provider}"
             if step.capability:
                 line += f" capability={step.capability}"
             if step.fallback_from:
                 line += f"  (FELL BACK from {step.fallback_from})"
-            print(line)
+            say(line)
         if step.reason:
-            print(f"     reason: {step.reason}")
+            say(f"     reason: {step.reason}")
         mark = {OK: "OK", FAIL: "FAILED", SKIP: "SKIPPED", MOCK: "MOCK"}[step.status]
         if step.status == FAIL:
-            print(f"  x  {mark}  [{step.error_class}] {step.error}")
+            say(f"  x  {mark}  [{step.error_class}] {step.error}")
         else:
-            print(f"  -  {mark}  ({step.duration_ms:.0f}ms)")
+            say(f"  -  {mark}  ({step.duration_ms:.0f}ms)")
 
     # ------------------------ called by the router, not by pipeline code ----
 
@@ -295,7 +324,7 @@ def run(total: int | None = None, *, run_id: str | None = None,
     trace = RunTrace(run_id=run_id or uuid.uuid4().hex[:8], total=total, echo=echo)
     _current = trace
     if echo:
-        print(f"[RUN {trace.run_id}]")
+        say(f"[RUN {trace.run_id}]")
     try:
         yield trace
     finally:

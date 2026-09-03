@@ -283,3 +283,55 @@ def test_tracing_never_breaks_routing_when_no_run_is_open() -> None:
     assert trace.current() is None
     assert CapabilityRouter(P(), None).perform(
         Capability.PROFILE, "fetch_profile", "x") == "ok"
+
+
+# --------------------------- console encoding --------------------------------
+# A prospect's post containing U+1F4AF raised UnicodeEncodeError out of print()
+# on a cp1252 Windows console and killed the whole run at stage 9 -- after the
+# profile and activity scrapes had already been paid for. Observed 2026-09-03
+# on a real profile.
+
+class _Cp1252Stdout:
+    """A console that rejects what cp1252 cannot represent, as Windows does."""
+
+    encoding = "cp1252"
+
+    def __init__(self):
+        self.written = []
+
+    def write(self, text):
+        text.encode("cp1252")     # raises exactly as the real console does
+        self.written.append(text)
+        return len(text)
+
+    def flush(self):
+        pass
+
+
+@pytest.mark.unit
+def test_unprintable_characters_do_not_reach_the_console(monkeypatch) -> None:
+    monkeypatch.setattr("linkedin_agent.trace.sys.stdout", _Cp1252Stdout())
+    out = trace.safe_text("great launch \U0001f4af congrats")
+    out.encode("cp1252")          # the assertion: this must not raise
+    assert "great launch" in out
+
+
+@pytest.mark.unit
+def test_encodable_text_is_returned_untouched(monkeypatch) -> None:
+    """A UTF-8 terminal must lose nothing -- the emoji should still print."""
+    class _Utf8:
+        encoding = "utf-8"
+    monkeypatch.setattr("linkedin_agent.trace.sys.stdout", _Utf8())
+    assert trace.safe_text("great launch \U0001f4af") == "great launch \U0001f4af"
+
+
+@pytest.mark.unit
+def test_a_step_survives_an_unprintable_field(monkeypatch, capsys) -> None:
+    """The run must continue, not just the string be cleaned."""
+    sink = _Cp1252Stdout()
+    monkeypatch.setattr("linkedin_agent.trace.sys.stdout", sink)
+    run = trace.RunTrace(echo=True)
+    with run.step("ACTIVITY_RETRIEVAL") as st:
+        st.note("post_0", "shipped it \U0001f4af")
+    assert run.steps[-1].status == trace.OK
+    assert any("post_0" in w for w in sink.written)

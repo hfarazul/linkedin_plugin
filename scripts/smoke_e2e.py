@@ -102,6 +102,7 @@ def main() -> int:
 
     from linkedin_agent import campaigns as campaigns_mod
     from linkedin_agent import db, drafter as drafter_mod, trace
+    from linkedin_agent.trace import say
     from linkedin_agent.config import load as load_config
     from linkedin_agent.icp_scoring import CampaignICP, grade
     from linkedin_agent.providers import Capability, build_router
@@ -463,8 +464,8 @@ def main() -> int:
                 router.close()
 
     # ------------------------------------------------------------- summary
-    print()
-    print(run.summary(header={
+    say()
+    say(run.summary(header={
         "Profile": args.profile,
         "Primary provider": primary,
         "Fallback provider": fallback or "(none)",
@@ -472,18 +473,18 @@ def main() -> int:
     }))
 
     if final_email:
-        print()
-        print("FINAL MESSAGE")
-        print(f"To: {final_email['to']}")
-        print(f"Subject: {final_email['subject']}")
-        print("Body:")
+        say()
+        say("FINAL MESSAGE")
+        say(f"To: {final_email['to']}")
+        say(f"Subject: {final_email['subject']}")
+        say("Body:")
         for line in final_email["body"].splitlines():
-            print(f"  {line}")
-        print()
-        print("NOT SENT. Email sending is not implemented (Phase 5): there is no")
-        print("EmailAdapter, no address discovery, and no suppression list. This")
-        print("stage renders what would be sent and stops.")
-    print("=" * 64)
+            say(f"  {line}")
+        say()
+        say("NOT SENT. Email sending is not implemented (Phase 5): there is no")
+        say("EmailAdapter, no address discovery, and no suppression list. This")
+        say("stage renders what would be sent and stops.")
+    say("=" * 64)
 
     return 1 if run.failed() else 0
 

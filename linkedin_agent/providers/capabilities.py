@@ -122,6 +122,18 @@ def _months_between(earlier: str | None, later: str | None) -> int | None:
     return (ly - ey) * 12 + (lm - em)
 
 
+def _same_employer(a: str | None, b: str | None) -> bool:
+    """Whether two position rows name the same company.
+
+    Deliberately conservative: when either side is blank we cannot tell, and
+    claiming a move we cannot substantiate is the failure this guards against,
+    so an unknown counts as "same" and suppresses the claim.
+    """
+    if not a or not b:
+        return True
+    return a.strip().casefold() == b.strip().casefold()
+
+
 def is_direct_transition(previous: "Position", current: "Position") -> bool:
     """True only when `current` plausibly follows `previous` immediately.
 
@@ -139,6 +151,14 @@ def is_direct_transition(previous: "Position", current: "Position") -> bool:
     Requires dates precise enough to trust: a year-only end date cannot
     distinguish a one-month gap from an eleven-month one.
     """
+    # An internal promotion is not a move. Observed 2026-09-03: Reservations
+    # Supervisor -> Reservations Manager at one employer, consecutive to the
+    # month, which rendered as "the move from your time at Royal Adventure
+    # Travel & Tourism to Royal Adventure Travel & Tourism". Same-employer
+    # steps are a different signal from a company change, and this function
+    # exists to license the sentence about a company change.
+    if _same_employer(previous.company, current.company):
+        return False
     if previous.date_precision not in ("day", "month"):
         return False
     if current.date_precision not in ("day", "month"):

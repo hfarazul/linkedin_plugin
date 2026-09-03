@@ -741,3 +741,32 @@ def test_the_marker_short_circuits_the_settle_wait(monkeypatch) -> None:
                         lambda a: (calls.append(a), [marker])[1])
     provider.get_recent_posts("https://www.linkedin.com/in/iamghazi/", 5)
     assert calls == []
+
+
+# ------------------------- internal promotions -------------------------------
+# Observed 2026-09-03 on a real profile: Reservations Supervisor -> Reservations
+# Manager at one employer, consecutive to the month. The dates said "direct
+# transition", so the email rendered "the move from your time at Royal Adventure
+# Travel & Tourism to Royal Adventure Travel & Tourism". A promotion is not a
+# company move, and this helper exists to license the sentence about one.
+
+@pytest.mark.unit
+def test_a_promotion_at_one_employer_is_not_a_move() -> None:
+    prev = _pos("Royal Adventure Travel & Tourism", "2018-10-01", "2023-03-01")
+    cur = _pos("Royal Adventure Travel & Tourism", "2023-03-01", "2025-06-01")
+    assert is_direct_transition(prev, cur) is False
+
+
+@pytest.mark.unit
+def test_employer_comparison_ignores_case_and_padding() -> None:
+    prev = _pos("  acme labs ", "2022-01-01", "2023-01-01")
+    cur = _pos("ACME Labs", "2023-02-01", None, is_current=True)
+    assert is_direct_transition(prev, cur) is False
+
+
+@pytest.mark.unit
+def test_a_missing_company_name_suppresses_the_claim() -> None:
+    """We cannot tell whether it is a move, so we do not assert one."""
+    prev = _pos("", "2022-01-01", "2023-01-01")
+    cur = _pos("Acme", "2023-02-01", None, is_current=True)
+    assert is_direct_transition(prev, cur) is False
