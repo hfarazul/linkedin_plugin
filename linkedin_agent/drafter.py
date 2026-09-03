@@ -39,6 +39,10 @@ KIND_MAX_CHARS = {
     # right reply is often shorter than an initiation — just enough to answer
     # the inbound and pose the next move. 600 cap, 400 sweet spot.
     "reply": 600,
+    # Email has more room than a LinkedIn DM but is not a newsletter. The cap
+    # is generous enough for a hook, positioning and a CTA without inviting a
+    # wall of text that reads as a template.
+    "email1": 1200,
 }
 
 # Minimum length per kind — anything shorter is almost always a degenerate
@@ -53,6 +57,7 @@ KIND_MIN_CHARS = {
     # one-word ack is almost always wrong on first reply. 80 keeps room for
     # acknowledge + content + sign-off.
     "reply": 80,
+    "email1": 300,
 }
 
 # Auto-retry budget. The drafter is stochastic — a fresh `claude -p` call

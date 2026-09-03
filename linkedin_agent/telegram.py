@@ -105,6 +105,7 @@ KIND_LABELS = {
     "dm2":          "DM #2 (4-day follow-up)",
     "dm3":          "DM #3 (breakup)",
     "reply":        "Reply",
+    "email1":       "Email #1",
 }
 
 

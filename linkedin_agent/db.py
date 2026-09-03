@@ -223,7 +223,8 @@ VALID_DISPOSITIONS = (
     "deferred",
 )
 
-VALID_DRAFT_KINDS = ("connect_note", "dm1", "dm2", "dm3", "reply")
+# email1 is draftable today; SENDING email is not implemented (Phase 5).
+VALID_DRAFT_KINDS = ("connect_note", "dm1", "dm2", "dm3", "reply", "email1")
 VALID_DRAFT_STATUSES = ("pending", "approved", "rejected", "sent")
 VALID_CAMPAIGN_STATUSES = ("active", "paused", "archived")
 

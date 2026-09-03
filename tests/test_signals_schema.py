@@ -252,14 +252,28 @@ def test_existing_writes_default_to_linkedin(db_env) -> None:
 
 
 @pytest.mark.integration
-def test_email_draft_kinds_not_enabled_yet(db_env) -> None:
-    """Email is deliberately deferred (Rule 9). The columns are groundwork, but
-    the kinds land in P6-1 together with length bounds and drafter support, so
-    validation and generation cannot drift apart."""
+def test_email_drafting_is_enabled_but_sending_is_not(db_env) -> None:
+    """email1 became a real draft kind when the E2E harness needed the
+    pipeline to terminate in an email, and it arrived with length bounds in
+    drafter.KIND_MAX_CHARS/KIND_MIN_CHARS so validation and generation stay in
+    step. SENDING is still unimplemented — there is no EmailAdapter, no
+    address discovery and no suppression list — so send_draft_via_adapter must
+    still refuse it rather than pretending to deliver."""
     from linkedin_agent import db
-    assert "email1" not in db.VALID_DRAFT_KINDS
-    with pytest.raises(ValueError, match="invalid draft kind"):
-        db.enqueue_draft(_prospect(db), "email1", "body")
+    from linkedin_agent import drafter
+
+    assert "email1" in db.VALID_DRAFT_KINDS
+    assert "email1" in drafter.KIND_MAX_CHARS
+    assert "email1" in drafter.KIND_MIN_CHARS
+
+    draft_id = db.enqueue_draft(_prospect(db), "email1", "a" * 400)
+    assert db.get_draft(draft_id)["kind"] == "email1"
+
+    # The send funnel has no email branch; an attempt must fail loudly.
+    from linkedin_agent.bot_daemon import send_draft_via_adapter
+    cfg = type("CFG", (), {"dry_run": True})()
+    with pytest.raises(RuntimeError, match="unknown draft kind"):
+        send_draft_via_adapter(cfg, None, db.get_draft(draft_id))
 
 
 # ----------------------------- migration on a legacy DB ----------------------

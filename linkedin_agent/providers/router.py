@@ -51,6 +51,36 @@ class NoProviderAvailable(ProviderError):
     """Neither provider can perform the capability."""
 
 
+def _record_attempt(capability, provider: str, exc: Exception, decision: str) -> None:
+    """Report a failed provider attempt to an open trace."""
+    try:
+        from ..trace import classify_error, current
+        run = current()
+        if run is not None:
+            run.record_attempt(capability.value, provider,
+                               error_class=classify_error(exc),
+                               detail=str(exc), decision=decision)
+    except Exception:  # pragma: no cover - instrumentation must not break routing
+        pass
+
+
+def _record_route(capability, provider: str, *, fallback_from: str | None = None) -> None:
+    """Report the routing decision to an open trace, if there is one.
+
+    Routing must never be silent: which provider answered, and whether that was
+    a fallback, is the first thing anyone asks when output looks wrong. The
+    import is local and failures are swallowed so tracing can never affect
+    production behaviour.
+    """
+    try:
+        from ..trace import current
+        run = current()
+        if run is not None:
+            run.record_route(capability.value, provider, fallback_from=fallback_from)
+    except Exception:  # pragma: no cover - instrumentation must not break routing
+        pass
+
+
 class CapabilityRouter:
     """Routes each capability to the first provider that supports it."""
 
@@ -109,6 +139,8 @@ class CapabilityRouter:
                 if index > 0:
                     logger.info("capability %s served by fallback %s",
                                 capability.value, provider.name)
+                _record_route(capability, provider.name,
+                              fallback_from=chain[index - 1].name if index else None)
                 return result
             except Exception as exc:
                 last = exc
@@ -129,7 +161,10 @@ class CapabilityRouter:
                                        "have partially completed",
                                        provider.name, capability.value,
                                        getattr(exc, "error_code", None))
+                    _record_attempt(capability, provider.name, exc, "raised")
                     raise
+                _record_attempt(capability, provider.name, exc,
+                                f"fell back to {chain[index + 1].name}")
                 logger.warning("%s could not serve %s (%s: %s) -- trying %s",
                                provider.name, capability.value,
                                type(exc).__name__, exc, chain[index + 1].name)

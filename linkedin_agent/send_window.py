@@ -77,5 +77,10 @@ def format_next_open(now: datetime | None = None) -> str:
     if is_disabled():
         return "now"
     when = next_open_time(now)
-    # Cross-platform format — %-I works on POSIX, %#I on Windows. Use a manual fallback.
-    return when.strftime("%a %-I:%M %p") if hasattr(when, "strftime") else str(when)
+    # Build the 12-hour clock by hand: %-I (unpadded hour) is POSIX-only and
+    # %#I is Windows-only, so neither is portable. The previous
+    # `hasattr(when, "strftime")` guard was dead code — datetime always has
+    # strftime — so this raised ValueError on Windows and took `status`,
+    # `send-approved` and the queued-approval Telegram card down with it.
+    hour = when.hour % 12 or 12
+    return f"{when.strftime('%a')} {hour}:{when.strftime('%M %p')}"
