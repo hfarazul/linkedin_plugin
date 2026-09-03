@@ -114,6 +114,7 @@ def main() -> int:
 
     final_email: dict | None = None
     prospect_id: int | None = None
+    aborted: str | None = None
 
     with trace.run(total=TOTAL_STAGES) as run:
         router = None
@@ -459,6 +460,14 @@ def main() -> int:
                 "subject": _subject_for(facts),
                 "body": body,
             }
+        except Exception as exc:
+            # A stage that dies must not take the summary with it. The first
+            # run against this profile lost DNS mid-scrape and printed sixty
+            # lines of traceback and no summary at all, so nothing said which
+            # stages had already passed or how far the pipeline got. The step
+            # that failed is already recorded; stop the pipeline, keep the
+            # report.
+            aborted = f"{type(exc).__name__}: {trace.redact(str(exc))[:200]}"
         finally:
             if router is not None:
                 router.close()
@@ -486,7 +495,12 @@ def main() -> int:
         say("stage renders what would be sent and stops.")
     say("=" * 64)
 
-    return 1 if run.failed() else 0
+    if aborted:
+        say()
+        say(f"RUN ABORTED after the stage above: {aborted}")
+        say("Stages not listed above were never reached.")
+
+    return 1 if (run.failed() or aborted) else 0
 
 
 def _subject_for(facts) -> str:
