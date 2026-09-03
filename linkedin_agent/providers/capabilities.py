@@ -103,6 +103,57 @@ class Position:
         return bool(self.start_date) and self.date_precision in ("day", "month")
 
 
+# A gap this long between one role ending and the next beginning means the two
+# are not consecutive: something happened in between that we cannot see. Three
+# months absorbs ordinary notice periods and gardening leave without licensing
+# a claim about a move that never occurred.
+MAX_DIRECT_TRANSITION_GAP_MONTHS = 3
+
+
+def _months_between(earlier: str | None, later: str | None) -> int | None:
+    """Whole months from `earlier` to `later`, or None if either is unusable."""
+    if not earlier or not later:
+        return None
+    try:
+        ey, em = int(earlier[:4]), int(earlier[5:7])
+        ly, lm = int(later[:4]), int(later[5:7])
+    except (ValueError, IndexError):
+        return None
+    return (ly - ey) * 12 + (lm - em)
+
+
+def is_direct_transition(previous: "Position", current: "Position") -> bool:
+    """True only when `current` plausibly follows `previous` immediately.
+
+    PhantomBuster returns a profile's current role and ONE other, and that other
+    is whatever LinkedIn lists second — not necessarily the role immediately
+    before. Observed 2026-09-03: a profile returned Group CFO at Tikehau
+    (from Oct 2023) alongside Senior Manager at Deloitte (to May 2018), a gap of
+    65 months with unknown roles inside it.
+
+    Describing that as "the move from Deloitte to Tikehau" states a transition
+    that did not happen, to a real person, at their real address. Personalized
+    outreach earns its reply by being right about someone; being confidently
+    wrong about their career is worse than sending nothing.
+
+    Requires dates precise enough to trust: a year-only end date cannot
+    distinguish a one-month gap from an eleven-month one.
+    """
+    if previous.date_precision not in ("day", "month"):
+        return False
+    if current.date_precision not in ("day", "month"):
+        return False
+    if not previous.end_date or not current.start_date:
+        # A previous role with no end date is still open — concurrent, not
+        # prior — so there is no move to describe.
+        return False
+    gap = _months_between(previous.end_date, current.start_date)
+    if gap is None:
+        return False
+    # A small negative gap means overlapping roles, which is a normal handover.
+    return -1 <= gap <= MAX_DIRECT_TRANSITION_GAP_MONTHS
+
+
 @dataclass
 class ProfileFacts:
     """A profile, normalized. Superset of what enrichment.py stores today,

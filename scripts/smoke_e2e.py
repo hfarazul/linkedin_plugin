@@ -281,6 +281,13 @@ def main() -> int:
                         if hasattr(db, "set_pitch_context") else None
                 st.note("pitch_context", pitch_context or "(none)")
                 st.note("evidence_available", len(context_bits))
+                if len(facts.positions) > 1:
+                    from linkedin_agent.providers.capabilities import (
+                        _months_between, is_direct_transition)
+                    a, b = facts.positions[1], facts.positions[0]
+                    gap = _months_between(a.end_date, b.start_date)
+                    st.note("transition_is_direct", is_direct_transition(a, b))
+                    st.note("gap_months", "unknown" if gap is None else gap)
                 if not context_bits:
                     st.status = trace.SKIP
                     st.why("no specific facts to personalize from — the drafter "
@@ -310,12 +317,23 @@ def main() -> int:
                     # Narrative, not database. The transition is described by
                     # what they built and where they went — never by dates or
                     # headcount, which read as surveillance in a cold email.
-                    if prev:
+                    from linkedin_agent.providers.capabilities import (
+                        is_direct_transition)
+                    # Only claim a move when the two roles are actually
+                    # consecutive. PhantomBuster returns current + one
+                    # other, and that other can be years earlier with
+                    # unknown roles in between.
+                    direct = bool(prev) and is_direct_transition(prev, cur)
+                    if direct:
                         built = (prev.description or "").strip().rstrip(".")
-                        what = (f"building {prev.company}'s {built[:60]}"
-                                if built else f"building at {prev.company}")
+                        # Whole clause or nothing: a mid-word truncation
+                        # reads as machine output.
+                        what = (f"building {prev.company}'s {built.split('.')[0]}"
+                                if built and len(built.split('.')[0]) <= 70
+                                else f"your time at {prev.company}")
                         move = f"the move from {what} to {now_co}"
                     else:
+                        # Fall back to what is certain: the current role.
                         move = f"the work you are doing at {now_co}"
                     body = (
                         f"Hi {first},\n\n"

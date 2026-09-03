@@ -423,3 +423,82 @@ def test_fetch_profile_raises_rather_than_returning_the_wrong_person(monkeypatch
     provider = PhantomBusterProvider(_Cfg(), jobs=FakeJobs())
     with pytest.raises(MalformedResponse, match="asked for"):
         provider.fetch_profile("emmanuelle-habert-1016b0162")
+
+
+# ===== direct-transition guard ==============================================
+#
+# PhantomBuster returns a profile's current role and ONE other, and that other
+# is whatever LinkedIn lists second — not necessarily the role immediately
+# before. Observed 2026-09-03 on a real profile: Group CFO at Tikehau from
+# Oct 2023 alongside Senior Manager at Deloitte to May 2018, a 65-month gap
+# with unknown roles inside it. Calling that "the move from Deloitte to
+# Tikehau" states a transition that did not happen, to a real person.
+
+from linkedin_agent.providers.capabilities import (
+    Position, is_direct_transition)
+
+
+def _pos(company, start=None, end=None, precision="month", **kw):
+    return Position(company=company, start_date=start, end_date=end,
+                    date_precision=precision, **kw)
+
+
+@pytest.mark.unit
+def test_consecutive_roles_are_a_direct_transition() -> None:
+    prev = _pos("BDO Luxembourg", "2008-01-01", "2024-05-01")
+    cur = _pos("ARCHIMED", "2024-05-01", None, is_current=True)
+    assert is_direct_transition(prev, cur) is True
+
+
+@pytest.mark.unit
+def test_the_tikehau_case_is_rejected() -> None:
+    """The real profile that exposed this."""
+    prev = _pos("Deloitte", "2015-06-01", "2018-05-01")
+    cur = _pos("Tikehau Capital", "2023-10-01", None, is_current=True)
+    assert is_direct_transition(prev, cur) is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("gap_end,expected", [
+    ("2024-05-01", True),    # same month
+    ("2024-03-01", True),    # 2-month gap: notice period
+    ("2024-02-01", True),    # 3-month gap: boundary, allowed
+    ("2024-01-01", False),   # 4-month gap: too long to assert a move
+    ("2023-05-01", False),   # a year
+])
+def test_gap_tolerance(gap_end, expected) -> None:
+    prev = _pos("Old Co", "2015-01-01", gap_end)
+    cur = _pos("New Co", "2024-05-01", None, is_current=True)
+    assert is_direct_transition(prev, cur) is expected
+
+
+@pytest.mark.unit
+def test_overlapping_handover_still_counts() -> None:
+    """Starting a month before formally leaving is a normal handover."""
+    prev = _pos("Old Co", "2015-01-01", "2024-06-01")
+    cur = _pos("New Co", "2024-05-01", None, is_current=True)
+    assert is_direct_transition(prev, cur) is True
+
+
+@pytest.mark.unit
+def test_year_precision_cannot_establish_a_direct_move() -> None:
+    """A year-only end date cannot distinguish a one-month gap from eleven."""
+    prev = _pos("Old Co", "2023-01-01", "2024-01-01", precision="year")
+    cur = _pos("New Co", "2024-05-01", None, is_current=True, precision="month")
+    assert is_direct_transition(prev, cur) is False
+
+
+@pytest.mark.unit
+def test_open_ended_previous_role_is_concurrent_not_prior() -> None:
+    """Two roles both marked current are held at the same time — there is no
+    move to describe. The Anjan profile is exactly this shape."""
+    prev = _pos("dan Lab", "2025-08-01", None, is_current=True)
+    cur = _pos("TalkingLands", "2026-02-01", None, is_current=True)
+    assert is_direct_transition(prev, cur) is False
+
+
+@pytest.mark.unit
+def test_missing_dates_are_never_a_direct_transition() -> None:
+    assert is_direct_transition(_pos("A"), _pos("B", "2024-01-01")) is False
+    assert is_direct_transition(_pos("A", "2020-01-01", "2022-01-01"),
+                                _pos("B")) is False
