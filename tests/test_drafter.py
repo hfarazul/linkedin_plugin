@@ -473,3 +473,89 @@ def test_draft_gives_up_after_3_spam_attempts(monkeypatch, db_env):
     with pytest.raises(drafter.DrafterError, match="all 3 drafter attempts failed"):
         drafter.draft("connect_note", pid)
     assert len(stub.calls) == 3
+
+
+# ===== email surveillance gate ==============================================
+#
+# A LinkedIn DM sits inside LinkedIn, where having seen someone's profile is
+# the medium. A cold email that quotes their start date announces that we
+# pulled a record on them — the prospect should feel read about, not surveilled.
+
+@pytest.mark.unit
+@pytest.mark.parametrize("body", [
+    "I saw you started as Software Engineer at TalkingLands in 2026-02.",
+    "You joined in March 2026, which is why I'm reaching out.",
+    "Since Feb 2026 you've been building there.",
+    "A 42 employees company is exactly our sweet spot.",
+    "You moved on 02/2026 to the new role.",
+])
+def test_scraped_details_are_detected(body) -> None:
+    from linkedin_agent.drafter import _contains_surveillance_tell
+    assert _contains_surveillance_tell(body) is not None, body
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("body", [
+    "what caught my eye is the move from building BarRaiser's interview "
+    "intelligence platform to a new stealth venture",
+    "Most founders at that transition point end up rebuilding internal tooling.",
+    "Curious if the real squeeze is closer to go-to-market ops or product velocity.",
+    "Do you have time this week or early next?",
+])
+def test_narrative_phrasing_is_clean(body) -> None:
+    """The reference email's own sentences must pass, or the gate is useless."""
+    from linkedin_agent.drafter import _contains_surveillance_tell
+    assert _contains_surveillance_tell(body) is None, body
+
+
+@pytest.mark.unit
+def test_email_draft_retries_on_a_scraped_detail(monkeypatch, tmp_path) -> None:
+    """The gate must drive a retry, not just report."""
+    import linkedin_agent.drafter as d
+
+    attempts = []
+    good = (
+        "Hi Anjan,\n\nWe have yet to be properly introduced, but I'm Haque with "
+        "Cortivo, and what caught my eye is the move from building dan Lab's "
+        "agentic systems to TalkingLands.\n\nMost founders at that transition "
+        "point end up rebuilding internal tooling and data pipelines by hand "
+        "while the product gets the attention. We would build the custom systems "
+        "that take that load off.\n\nThat's our outside read. Curious if the real "
+        "squeeze is closer to go-to-market ops or product velocity, or somewhere "
+        "we haven't surfaced.\n\nDo you have time this week to walk through what "
+        "we'd build?\n\nBest,\nHaque Farazul\nCortivo")
+
+    def fake_invoke(prompt, timeout=90):
+        attempts.append(prompt)
+        if len(attempts) == 1:
+            return "Hi Anjan,\n\n" + "I saw you joined in March 2026. " * 12
+        return good
+
+    monkeypatch.setattr(d, "_invoke_claude", fake_invoke)
+    monkeypatch.setattr(d, "build_input", lambda kind, pid, recent_posts=None:
+                        d.DrafterInput(kind=kind, campaign={}, prospect={}))
+
+    out = d.draft("email1", 1)
+    assert out == good
+    assert len(attempts) == 2, "the first attempt should have been rejected"
+    assert "surveillance" in attempts[1] or "scraping" in attempts[1], \
+        "the retry hint must name the actual problem"
+
+
+@pytest.mark.unit
+def test_surveillance_gate_does_not_apply_to_linkedin_kinds(monkeypatch) -> None:
+    """Inside LinkedIn, referencing a profile is the medium, not a tell."""
+    import linkedin_agent.drafter as d
+
+    body_with_date = (
+        "Saw you moved in March 2026 - congrats on the jump. I'm at Cortivo, a "
+        "small AI-engineering studio I run with my co-founder Ritik, ex-Amazon "
+        "SDE, alongside engineers from the IITs. We pair one senior engineer "
+        "with AI tooling so a team ships v1 in six to ten weeks rather than "
+        "spending the quarter recruiting for it. What does your build side look "
+        "like right now, and is that something you are staffing up or would "
+        "rather hand to a pod that already works together?")
+    monkeypatch.setattr(d, "_invoke_claude", lambda p, timeout=90: body_with_date)
+    monkeypatch.setattr(d, "build_input", lambda kind, pid, recent_posts=None:
+                        d.DrafterInput(kind=kind, campaign={}, prospect={}))
+    assert d.draft("dm1", 1) == body_with_date

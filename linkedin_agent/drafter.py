@@ -99,6 +99,42 @@ def _contains_spam_tell(body: str) -> str | None:
     return None
 
 
+# Details that reveal the message was assembled from a scraped profile rather
+# than written by someone who noticed something. A prospect should feel read
+# about, not surveilled.
+#
+# "the move to a new stealth venture" reads as human attention.
+# "started February 2026" reads as a database row, because it is one — and it
+# invites the obvious question of where we got it.
+_SURVEILLANCE_TELLS = (
+    # ISO or slashed dates: 2026-02, 2026/02, 02/2026
+    re.compile(r"\b(19|20)\d{2}[-/]\d{1,2}\b"),
+    re.compile(r"\b\d{1,2}[-/](19|20)\d{2}\b"),
+    # "in March 2026", "since Feb 2026" — a month-year stamp next to a verb
+    # that only makes sense if we looked it up.
+    re.compile(r"(?i)\b(?:since|in|from|started|joined|as of)\s+"
+               r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+"
+               r"(?:19|20)\d{2}\b"),
+    # Headcount straight off a company page.
+    re.compile(r"(?i)\b\d{1,6}\s*(?:\+\s*)?employees\b"),
+    re.compile(r"(?i)\b(?:employee count|headcount) of \d+"),
+)
+
+
+def _contains_surveillance_tell(body: str) -> str | None:
+    """Return the matched scraped-detail phrase, or None if clean.
+
+    Applied to email only. A LinkedIn DM sits inside LinkedIn, where seeing
+    someone's profile is the medium; a cold email arriving with their start
+    date in it is a different and worse experience.
+    """
+    for pattern in _SURVEILLANCE_TELLS:
+        match = pattern.search(body)
+        if match:
+            return match.group(0)
+    return None
+
+
 @dataclass
 class DrafterInput:
     kind: str
@@ -360,6 +396,24 @@ def draft(
                 f"doing well'. Start with a specific reference instead."
             )
             continue
+
+        # Scraped-detail scan, email only. Inside LinkedIn, having seen
+        # someone's profile is the medium. A cold email that quotes their
+        # start date announces that we pulled a record on them.
+        if kind.startswith("email"):
+            tell = _contains_surveillance_tell(body)
+            if tell:
+                last_failure = f"surveillance tell {tell!r} (attempt {attempt})"
+                last_body_preview = body
+                retry_hint = (
+                    f"Your previous attempt contained {tell!r} — a detail that "
+                    f"only comes from scraping a profile, so it reads as "
+                    f"surveillance rather than attention. Remove every date, "
+                    f"month-year stamp and employee count. Describe the move "
+                    f"in narrative terms instead: what they built at the "
+                    f"previous company, and what they are doing now."
+                )
+                continue
 
         # All quality gates passed.
         return body

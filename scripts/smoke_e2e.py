@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -304,22 +305,34 @@ def main() -> int:
                 else:
                     cur = facts.positions[0] if facts.positions else None
                     prev = facts.positions[1] if len(facts.positions) > 1 else None
-                    where = cur.company if cur else "your company"
+                    first = (facts.full_name or "there").split()[0]
+                    now_co = cur.company if cur else "your new company"
+                    # Narrative, not database. The transition is described by
+                    # what they built and where they went — never by dates or
+                    # headcount, which read as surveillance in a cold email.
+                    if prev:
+                        built = (prev.description or "").strip().rstrip(".")
+                        what = (f"building {prev.company}'s {built[:60]}"
+                                if built else f"building at {prev.company}")
+                        move = f"the move from {what} to {now_co}"
+                    else:
+                        move = f"the work you are doing at {now_co}"
                     body = (
-                        f"Hi {(facts.full_name or 'there').split()[0]} — I saw you "
-                        f"started as {cur.title if cur else 'your current role'} at "
-                        f"{where}"
-                        f"{' in ' + cur.start_date[:7] if cur and cur.start_date else ''}"
-                        f"{', after ' + (prev.title or 'your previous role') + ' at ' + prev.company if prev else ''}"
-                        ".\n\n"
-                        "I'm at Cortivo — a small AI-engineering studio I run with my "
-                        "co-founder Ritik (ex-Amazon SDE), with engineers from the IITs. "
-                        "We pair one senior engineer with AI tooling so a team ships v1 "
-                        "in six to ten weeks instead of spending a quarter recruiting "
-                        "for it.\n\n"
-                        f"Is the build side at {where} something you are staffing up "
-                        "right now, or something you would rather hand to a pod that "
-                        "already works together?")
+                        f"Hi {first},\n\n"
+                        f"We have yet to be properly introduced, but I'm Haque "
+                        f"with Cortivo, and what caught my eye is {move}.\n\n"
+                        "Most founders at that transition point end up rebuilding "
+                        "internal tooling and data pipelines by hand while the "
+                        "product gets the attention. We would build the custom "
+                        "systems that take that load off, tailored to how your "
+                        "company actually works.\n\n"
+                        f"That's our outside read. Curious if the real squeeze at "
+                        f"{now_co} is closer to go-to-market ops or product "
+                        "velocity, or somewhere we haven't surfaced.\n\n"
+                        "Do you have time this week or early next to walk through "
+                        "what we'd build? Let me know what works and I'll send "
+                        "the invite.\n\n"
+                        "Best,\nHaque Farazul\nCortivo")
                     st.why("STUBBED: no `claude -p` call. Pass --real-drafter to "
                            "exercise the live drafter and its quality gates")
                 st.note("length", len(body))
@@ -329,10 +342,16 @@ def main() -> int:
                 cap = drafter_mod.KIND_MAX_CHARS.get(args.kind, 10_000)
                 floor = drafter_mod.KIND_MIN_CHARS.get(args.kind, 0)
                 spam = drafter_mod._contains_spam_tell(body)
+                surveillance = (drafter_mod._contains_surveillance_tell(body)
+                                if args.kind.startswith("email") else None)
+                has_link = bool(re.search(r"https?://|cal\.com", body))
                 label_check = getattr(drafter_mod, '_contains_audience_label', None)
                 label = label_check(body) if label_check else None
                 st.note("within_length", floor <= len(body) <= cap)
                 st.note("spam_tell", spam or "none")
+                if args.kind.startswith("email"):
+                    st.note("surveillance_tell", surveillance or "none")
+                    st.note("contains_link", has_link)
                 st.note("audience_label",
                         (label or "none") if label_check
                         else "gate not present on this branch (PR #1)")
@@ -341,6 +360,11 @@ def main() -> int:
                     problems.append(f"length {len(body)} outside [{floor}, {cap}]")
                 if spam:
                     problems.append(f"spam tell {spam!r}")
+                if surveillance:
+                    problems.append(f"scraped detail {surveillance!r} "
+                                    f"(reads as surveillance)")
+                if has_link and args.kind.startswith("email"):
+                    problems.append("cold email contains a link")
                 if label:
                     problems.append(f"audience label {label!r}")
                 if problems:
