@@ -84,6 +84,11 @@ def main() -> int:
                          "the campaign's target region still reaches the "
                          "later stages. Test harness only -- the ICP rules "
                          "used by real campaigns are untouched.")
+    ap.add_argument("--skip-role", action="store_true",
+                    help="Bypass the headline role check. The campaign pitch "
+                         "is written for a specific buyer, so a run using "
+                         "this previews an email you would not actually "
+                         "send. Test harness only.")
     args = ap.parse_args()
 
     import logging
@@ -225,6 +230,8 @@ def main() -> int:
                                   full_name=facts.full_name,
                                   headline=facts.headline,
                                   location=facts.location)
+                if args.skip_role:
+                    icp = replace(icp, role_required=re.compile(r""))
                 if args.skip_geo:
                     # Replace the campaign's pattern rather than patching the
                     # result, so geo_match reports what was actually evaluated
@@ -232,6 +239,7 @@ def main() -> int:
                     icp = replace(icp, geo_required=re.compile(r""))
                 result = grade(hit, icp)
                 st.note("geo_bypassed", bool(args.skip_geo))
+                st.note("role_bypassed", bool(args.skip_role))
                 st.note("geo_match", result.geo_match)
                 st.note("role_match", result.role_match)
                 st.note("noise_excluded", result.noise_excluded)
@@ -247,6 +255,13 @@ def main() -> int:
                     st.status = trace.SKIP
                     st.why("ICP gate failed — continuing anyway so the rest of "
                            "the pipeline stays observable in this test")
+                elif args.skip_geo or args.skip_role:
+                    bypassed = ", ".join(
+                        n for n, on in (("geo", args.skip_geo),
+                                        ("role", args.skip_role)) if on)
+                    st.why(f"qualified only because the {bypassed} gate(s) "
+                           f"were bypassed for this run; a real campaign "
+                           f"would have stopped here")
                 else:
                     st.why("passes the campaign's ICP rules")
 
