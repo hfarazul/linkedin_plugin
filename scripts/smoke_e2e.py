@@ -239,7 +239,15 @@ def main() -> int:
                     # result, so geo_match reports what was actually evaluated
                     # instead of a hand-set True.
                     icp = replace(icp, geo_required=re.compile(r""))
-                result = grade(hit, icp)
+                # Every role they currently hold, not just the one their
+                # headline leads with. Anjan B is a co-founder of one company
+                # and an engineer at another; his headline names only the
+                # engineering job, so headline-only scoring dropped a founder
+                # from a founder campaign.
+                current_titles = [pos.title for pos in facts.positions
+                                  if pos.is_current and pos.title]
+                st.note("titles_considered", current_titles or "(headline only)")
+                result = grade(hit, icp, titles=current_titles)
                 st.note("geo_bypassed", bool(args.skip_geo))
                 st.note("role_bypassed", bool(args.skip_role))
                 st.note("geo_match", result.geo_match)

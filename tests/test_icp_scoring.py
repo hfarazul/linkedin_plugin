@@ -168,3 +168,58 @@ def test_notes_are_human_readable():
     g = grade(_hit(headline="Founder & Coach", location="Bengaluru"))
     assert any("geo" in n.lower() for n in g.notes)
     assert any("coach" in n.lower() for n in g.notes)
+
+
+# --------------------- roles the headline does not lead with -----------------
+# Observed 2026-09-04: Anjan B is Co-Founder of dan Lab and Software Engineer at
+# TalkingLands. His headline names only the engineering job, so headline-only
+# scoring returned role_match=False and a founder campaign would have dropped a
+# founder. After enrichment we hold every position, so scoring on the headline
+# alone discards information we already paid to fetch.
+
+US = "San Francisco, CA"
+
+
+@pytest.mark.unit
+def test_a_founder_title_qualifies_even_when_the_headline_hides_it() -> None:
+    hit = _hit(headline="Software Engineer @ TalkingLands | AI Developer",
+               location=US)
+    result = grade(hit, CampaignICP(), titles=["Software Engineer", "Co-Founder"])
+    assert result.role_match is True
+    assert result.is_keeper is True
+
+
+@pytest.mark.unit
+def test_the_note_says_the_match_came_from_a_position() -> None:
+    """A reader of the log should not have to guess why this person passed."""
+    hit = _hit(headline="Software Engineer", location=US)
+    result = grade(hit, CampaignICP(), titles=["Co-Founder"])
+    assert any("not the headline" in n for n in result.notes)
+
+
+@pytest.mark.unit
+def test_an_investor_title_still_excludes_despite_a_founder_title() -> None:
+    """The reason titles feed the excluded pattern too. Matching only on the
+    required pattern would qualify a VC whose headline hides it."""
+    hit = _hit(headline="Building things", location=US)
+    result = grade(hit, CampaignICP(),
+                   titles=["Founder", "Venture Partner at Acme Ventures"])
+    assert result.role_match is True
+    assert result.noise_excluded is False
+    assert result.is_keeper is False
+
+
+@pytest.mark.unit
+def test_search_time_grading_is_unchanged() -> None:
+    """Search results carry no positions. That path must behave exactly as
+    before, or this change quietly alters who every campaign imports."""
+    hit = _hit(headline="Software Engineer", location=US)
+    assert grade(hit, CampaignICP()).role_match is False
+    assert grade(hit, CampaignICP(), titles=[]).role_match is False
+
+
+@pytest.mark.unit
+def test_blank_titles_do_not_widen_the_match() -> None:
+    hit = _hit(headline="Software Engineer", location=US)
+    result = grade(hit, CampaignICP(), titles=["", None])
+    assert result.role_match is False

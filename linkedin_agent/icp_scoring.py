@@ -25,6 +25,7 @@ the brief's YAML frontmatter let specific campaigns relax or tighten:
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -107,7 +108,22 @@ class CampaignICP:
 
 # --------------------------------------------------------- scoring functions
 
-def grade(prospect: ProspectHit, icp: CampaignICP | None = None) -> ProspectGrade:
+def grade(prospect: ProspectHit, icp: CampaignICP | None = None,
+          *, titles: Sequence[str] = ()) -> ProspectGrade:
+    """Grade one prospect against a campaign's ICP.
+
+    `titles` is every current position title, when the caller has them. At
+    search time only a headline exists, so it defaults to empty and the
+    behaviour is unchanged there. After enrichment we hold the full position
+    list, and scoring on the headline alone throws that away: observed
+    2026-09-04, a co-founder of one company whose headline led with his
+    engineering job at another was graded role_match=False and would have been
+    dropped from a campaign targeting founders.
+
+    Titles feed BOTH the required and the excluded pattern. Feeding only the
+    required one would qualify an investor whose headline hides it and whose
+    positions read "Founder & Venture Partner".
+    """
     icp = icp or CampaignICP()
     notes: list[str] = []
 
@@ -118,12 +134,18 @@ def grade(prospect: ProspectHit, icp: CampaignICP | None = None) -> ProspectGrad
 
     # Role match in headline
     headline = prospect.headline or ""
-    role_match = bool(icp.role_required.search(headline))
+    role_text = " | ".join([headline, *(t for t in titles if t)])
+    role_match = bool(icp.role_required.search(role_text))
     if not role_match:
-        notes.append("no founder/CEO/owner keyword in headline")
+        notes.append("no founder/CEO/owner keyword in headline or current roles"
+                     if titles else "no founder/CEO/owner keyword in headline")
+    elif titles and not icp.role_required.search(headline):
+        # Worth saying out loud: this person qualified on a role they do not
+        # lead with, which is exactly the case that used to be missed.
+        notes.append("role matched on a current position, not the headline")
 
     # Noise exclusion
-    noise_match = icp.role_excluded.search(headline)
+    noise_match = icp.role_excluded.search(role_text)
     noise_excluded = noise_match is None
     if noise_match:
         notes.append(f"noise: {noise_match.group(0)!r}")
