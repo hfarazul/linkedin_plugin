@@ -226,6 +226,7 @@ def main() -> int:
 
             # ---- 07 ICP SCORING -----------------------------------------
             with run.step("ICP_SCORING") as st:
+                brief = None
                 try:
                     brief = campaigns_mod.load_brief(args.campaign)
                     meta, _ = campaigns_mod._parse_frontmatter(brief.path.read_text())
@@ -414,9 +415,23 @@ def main() -> int:
                 # published something implying the problem.
                 pain = (None if bundle.pain_claim_licensed
                         else drafter_mod._contains_unsupported_pain_claim(body))
+                # At the thin tiers, arguing that their category makes us
+                # relevant is the same invention with a hedge on it.
+                inferred = (drafter_mod._contains_inferred_relevance(body)
+                            if bundle.tier in (evidence_mod.Tier.WEAK,
+                                               evidence_mod.Tier.NONE)
+                            and not bundle.pain_claim_licensed else None)
+                # Claims about US are grounded in the brief, not in the
+                # evidence about them.
+                grounding = evidence_mod.CortivoGrounding(
+                    brief.brief if brief else "",
+                    drafter_mod._shared_positioning())
+                invented = evidence_mod.ungrounded_cortivo_claim(body, grounding)
                 st.note("within_length", floor <= len(body) <= cap)
                 st.note("template_filler", filler or "none")
                 st.note("unsupported_pain_claim", pain or "none")
+                st.note("inferred_relevance", inferred or "none")
+                st.note("ungrounded_cortivo_claim", invented or "none")
                 st.note("spam_tell", spam or "none")
                 if args.kind.startswith("email"):
                     st.note("surveillance_tell", surveillance or "none")
@@ -433,6 +448,12 @@ def main() -> int:
                     problems.append(f"unsupported pain claim {pain!r} — no "
                                     f"signal licenses a claim about this "
                                     f"person's problems")
+                if inferred:
+                    problems.append(f"inferred relevance {inferred!r} — "
+                                    f"reasoned from their category, not from "
+                                    f"anything they said")
+                if invented:
+                    problems.append(f"ungrounded Cortivo claim: {invented}")
                 if spam:
                     problems.append(f"spam tell {spam!r}")
                 if surveillance:

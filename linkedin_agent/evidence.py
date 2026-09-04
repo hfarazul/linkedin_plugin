@@ -352,6 +352,120 @@ def phrasing_for(evidence: Evidence) -> tuple[str, str]:
         ("what you posted", "that's relevant to what you're building"))
 
 
+# ------------------------------------------------- claims about ourselves
+#
+# The prospect gate stops us inventing THEIR problems. It says nothing about
+# inventing OUR credentials, and the first live drafter run did exactly that:
+#
+#     "so a lot of our week is spent in exactly that parallel-agent workflow,
+#      on client code rather than side projects"
+#
+# Nothing in the brief says that. It is a fabricated claim about how this
+# agency works, mirrored back at a prospect who had just posted about parallel
+# agents — flattering, plausible, and untrue. A prospect who replies to it is
+# replying to something we made up, and the first call has to walk it back.
+#
+# So Cortivo claims get their own category, grounded in the approved brief
+# rather than in the evidence about the prospect.
+
+
+class CortivoGrounding:
+    """The approved facts about us, and a check against them.
+
+    The brief is the only authority. Anything specific about our team, our
+    clients, our results, our timelines or our working practices has to trace
+    back to it.
+
+    This is deliberately not a general-purpose fact checker, and it should not
+    be described as one. It catches two shapes that cover the realistic
+    failures: an invented specific (a name, a number, a metric we never
+    claimed), and an assertion about how we work built from vocabulary the
+    brief never uses. A fluent paraphrase of a false claim, using only
+    brief-approved words, would pass — the human approval step remains the
+    backstop.
+    """
+
+    def __init__(self, *briefs: str) -> None:
+        joined = " ".join(b or "" for b in briefs)
+        self.text = joined
+        low = joined.lower()
+        self.vocabulary = set(re.findall(r"[a-z0-9][a-z0-9'+.-]*", low))
+        # Numbers written any way the brief writes them.
+        self.numbers = set(re.findall(r"\d+", low))
+
+
+# Sentences that assert how we spend our time or who we work with. The brief
+# describes what we build and for whom; it does not describe our week. These
+# shapes are where invention showed up.
+_PRACTICE_ASSERTION = re.compile(
+    r"(?i)\b(?:"
+    r"(?:a lot|most|much|half|the bulk) of our|"
+    r"our (?:week|days?|time|process|workflow) (?:is|are|gets?)|"
+    r"we (?:spend|typically|usually|always|often|routinely|tend to|mostly)|"
+    r"we work (?:with|on|in)|"
+    r"our (?:clients?|customers?|portfolio)"
+    r")\b")
+
+# Words any email may use about us without the brief listing them. Without
+# this the check fires on ordinary English rather than on invented facts.
+_GENERIC = {
+    "cortivo", "we", "our", "us", "i", "im", "a", "an", "the", "and", "or",
+    "but", "so", "that", "this", "these", "those", "it", "its", "is", "are",
+    "was", "were", "be", "been", "am", "do", "does", "did", "have", "has",
+    "had", "will", "would", "can", "could", "should", "may", "might", "must",
+    "of", "in", "on", "at", "to", "for", "with", "from", "by", "as", "than",
+    "then", "there", "here", "what", "which", "who", "how", "when", "where",
+    "why", "not", "no", "yes", "up", "out", "over", "into", "about", "rather",
+    "instead", "usually", "often", "typically", "mostly", "very", "much",
+    "more", "less", "most", "lot", "lots", "some", "any", "all", "one", "two",
+    "small", "senior", "engineer", "engineers", "engineering", "studio",
+    "build", "builds", "building", "built", "work", "works", "working",
+    "team", "teams", "founder", "founders", "software", "product", "products",
+    "week", "weeks", "day", "days", "time", "client", "clients", "code",
+    "run", "runs", "pair", "pairs", "tooling", "ai", "you", "your", "they",
+    "their", "them", "he", "she", "if", "just", "own", "get", "gets", "make",
+    "makes", "made", "need", "needs", "want", "wants", "put", "take", "takes",
+    "help", "helps", "kind", "sort", "thing", "things", "way", "ways",
+    # Ordinary verbs and adverbs. Leaving these in makes the check fire on
+    # "spent" and report that as the invented fact, which misdirects the retry.
+    "spend", "spent", "spends", "exactly", "side", "rather", "really",
+    "actually", "still", "even", "also", "both", "each", "every", "same",
+    "other", "another", "across", "around", "between", "before", "after",
+    "since", "while", "during", "through", "without", "within", "onto",
+}
+
+
+def ungrounded_cortivo_claim(body: str,
+                             grounding: CortivoGrounding) -> str | None:
+    """Return the unsupported claim about Cortivo, or None if clean."""
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", body):
+        clean = sentence.strip()
+        if not clean or not re.search(r"(?i)\b(?:we|our|cortivo|i run|i'm at)\b",
+                                      clean):
+            continue
+
+        # An invented specific: a proper noun or figure we never claimed.
+        for token in re.findall(r"\b[A-Z][A-Za-z0-9+.-]{2,}\b", clean[1:]):
+            if token.lower() not in grounding.vocabulary:
+                return f"{token} (not in the brief)"
+        for number in re.findall(r"\b\d+\b", clean):
+            if number not in grounding.numbers:
+                return f"the figure {number} (not in the brief)"
+
+        # An assertion about how we work, built from words the brief never uses.
+        if _PRACTICE_ASSERTION.search(clean):
+            unknown = [w for w in re.findall(r"[a-z][a-z'-]{3,}", clean.lower())
+                       if w not in _GENERIC and w not in grounding.vocabulary]
+            if unknown:
+                # Report the longest first: the distinctive term is the one the
+                # drafter invented, and naming "spent" instead of
+                # "parallel-agent" makes for a retry hint that misdirects.
+                unknown.sort(key=len, reverse=True)
+                named = ", ".join(repr(w) for w in unknown[:3])
+                return f'"{clean[:70]}..." — {named} not in the brief'
+    return None
+
+
 # ------------------------------------------------------------ subject + ask
 
 def subject_for(facts, bundle: EvidenceBundle) -> str:

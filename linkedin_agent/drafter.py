@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Sequence
 
 from . import campaigns as campaigns_mod
+from . import evidence as evidence_mod
 from . import db
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -149,6 +150,41 @@ _PAIN_CLAIM_PATTERNS = (
 def _contains_unsupported_pain_claim(body: str) -> str | None:
     """Return the phrase asserting an unevidenced problem, or None if clean."""
     for pattern in _PAIN_CLAIM_PATTERNS:
+        match = pattern.search(body)
+        if match:
+            return match.group(0)
+    return None
+
+
+# The softer move the drafter makes when it has nothing: instead of asserting
+# a problem outright, it argues that the prospect's *category* is one where our
+# work matters. From the first live run, for a prospect we knew one fact about:
+#
+#     "Multi-property, multi-country operations is a setting where that work
+#      tends to matter"
+#
+# That is the same invention wearing a hedge. It reads as insight and contains
+# none — we did not know it, we reasoned it from his job title, and reasoning
+# a pain from a job title is the conversion this system exists to block.
+#
+# Applied only at the weak and none tiers. At moderate the prospect has given
+# us something to react to and a cautious relevance argument is legitimate; at
+# strong it is the point.
+_INFERRED_RELEVANCE_PATTERNS = (
+    re.compile(r"(?i)\bis (?:a|an|the) (?:setting|environment|context|world|"
+               r"space|place) where\b"),
+    re.compile(r"(?i)\btends to (?:matter|be|come up|bite|get|show up)\b"),
+    re.compile(r"(?i)\b(?:usually|often|typically) (?:matters|comes up|where)\b"),
+    re.compile(r"(?i)\bwhere that (?:kind of )?work (?:tends|usually|often|"
+               r"matters)\b"),
+    re.compile(r"(?i)\bthat(?:'s| is) (?:usually|often|typically) (?:where|when)\b"),
+    re.compile(r"(?i)\bin (?:my|our) experience,? (?:teams|companies|operators)\b"),
+)
+
+
+def _contains_inferred_relevance(body: str) -> str | None:
+    """Return the reasoned-from-nothing relevance claim, or None if clean."""
+    for pattern in _INFERRED_RELEVANCE_PATTERNS:
         match = pattern.search(body)
         if match:
             return match.group(0)
@@ -427,6 +463,22 @@ def _clean_output(raw: str) -> str:
 
 # -------------------------------------------------------------- public API
 
+def _shared_positioning() -> str:
+    """The shared Cortivo brief, which holds the facts about us.
+
+    Read rather than imported so an edit to the brief takes effect on the next
+    draft — the brief is the authority on what we may claim, and a stale copy
+    would authorise yesterday's facts.
+    """
+    try:
+        return campaigns_mod.brief_path_for("_cortivo").read_text(
+            encoding="utf-8", errors="replace")
+    except (OSError, AttributeError):
+        # No brief means nothing is grounded, so every specific claim about us
+        # is rejected. That is the right way to fail: silence beats invention.
+        return ""
+
+
 _SUBJECT_RE = re.compile(r"^\s*subject\s*:\s*(.+?)\s*\n+", re.IGNORECASE)
 
 
@@ -476,6 +528,18 @@ def draft(
     else:
         pain_licensed = False
         enforce_pain_gate = kind.startswith("email")
+
+    # At the weak tier the correct email is: the verified observation, a plain
+    # introduction, an ask. Arguing that the prospect's category makes us
+    # relevant is what the drafter reaches for instead of admitting it knows
+    # one thing, and it is invention with a hedge on it.
+    thin_evidence = (evidence or {}).get("tier") in ("weak", "none")
+
+    # Claims about us are grounded in the brief, not in anything about the
+    # prospect. Both briefs: the campaign's own, and the shared positioning
+    # file that holds the team, clients and engagement facts.
+    grounding = evidence_mod.CortivoGrounding(
+        (inp.campaign or {}).get("brief") or "", _shared_positioning())
 
     last_failure: str | None = None
     last_body_preview: str | None = None
@@ -571,6 +635,41 @@ def draft(
                     f"short honest email beats a confident wrong one."
                 )
                 continue
+
+        # Reasoned-relevance scan. Only at the thin tiers, where the drafter
+        # has nothing to react to and argues from the prospect's category
+        # instead.
+        if thin_evidence and not pain_licensed:
+            inferred = _contains_inferred_relevance(body)
+            if inferred:
+                last_failure = f"inferred relevance {inferred!r} (attempt {attempt})"
+                last_body_preview = body
+                retry_hint = (
+                    f"Your previous attempt argued that this person's "
+                    f"situation is one where our work matters ({inferred!r}). "
+                    f"You reasoned that from their job title, not from "
+                    f"anything they said. At this evidence level the email is "
+                    f"three things and no more: the one thing we verified, a "
+                    f"plain sentence on what Cortivo does, and the ask. Do "
+                    f"not argue for relevance — ask about it."
+                )
+                continue
+
+        # Claims about US. The brief is the only authority for our team,
+        # clients, results, timelines and how we work.
+        invented = evidence_mod.ungrounded_cortivo_claim(body, grounding)
+        if invented:
+            last_failure = f"ungrounded Cortivo claim {invented!r} (attempt {attempt})"
+            last_body_preview = body
+            retry_hint = (
+                f"Your previous attempt made a claim about Cortivo that the "
+                f"brief does not support: {invented}. Do not describe our "
+                f"week, our process, our clients or our results beyond what "
+                f"the brief states, and do not mirror the prospect's own "
+                f"vocabulary back as something we do. Everything about us "
+                f"must be traceable to the brief."
+            )
+            continue
 
         # Scraped-detail scan, email only. Inside LinkedIn, having seen
         # someone's profile is the medium. A cold email that quotes their
