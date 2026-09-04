@@ -420,3 +420,55 @@ def test_a_pain_claim_is_caught_above_the_length_floor() -> None:
             "this week to get into it?\n\nBest,\nHaque")
     assert len(body) >= d.KIND_MIN_CHARS["email1"], len(body)
     assert d._contains_unsupported_pain_claim(body) is not None
+
+
+# ------------------------- typographic apostrophes ---------------------------
+# LinkedIn's composer and every phone keyboard emit U+2019, not an ASCII
+# apostrophe, so "We’re Hiring" is what actually arrives from a scrape. Every
+# pattern written with a straight quote failed against it silently.
+#
+# Observed 2026-09-04: a prospect who had posted three hiring ads in two days
+# scored signals=none, tier=moderate, and got the cautious email written for
+# someone we know nothing about. In the spam gate the same gap let "I'd love to
+# connect" through to a real person.
+
+CURLY = "\u2019"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("text", [
+    f"We{CURLY}re Hiring | AI-Driven QA Automation Engineer (SDET)",
+    f"We{CURLY}re hiring engineers this quarter",
+])
+def test_a_hiring_post_with_a_curly_apostrophe_is_still_a_signal(text) -> None:
+    assert [s.name for s in detect_signals([_post(text)])] == ["hiring_engineers"]
+
+
+@pytest.mark.unit
+def test_both_apostrophe_forms_score_the_same_tier() -> None:
+    """The scrape must not decide the email. Two renderings of one sentence
+    cannot produce two different evidence tiers."""
+    straight = build_evidence(GOLDEN["strong_hiring"],
+                              [_post("We're hiring engineers")])
+    curly = build_evidence(GOLDEN["strong_hiring"],
+                           [_post(f"We{CURLY}re hiring engineers")])
+    assert straight.tier is curly.tier is Tier.STRONG
+    assert straight.pain_claim_licensed == curly.pain_claim_licensed is True
+
+
+@pytest.mark.unit
+def test_a_curly_spam_tell_does_not_reach_a_real_person() -> None:
+    """The costliest instance of the same bug: a missed signal loses a good
+    email, but a missed spam tell sends a bad one."""
+    assert d._contains_spam_tell(f"Hi there, I{CURLY}d love to connect.")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("check,text", [
+    ("_contains_unsupported_pain_claim",
+     f"You{CURLY}re probably rebuilding all of that by hand."),
+    ("_contains_inferred_relevance",
+     f"That{CURLY}s usually where we come in."),
+])
+def test_the_other_gates_fold_quotes_too(check, text) -> None:
+    assert getattr(d, check)(text) is not None

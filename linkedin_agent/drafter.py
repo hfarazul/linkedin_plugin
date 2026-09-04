@@ -93,7 +93,10 @@ SPAM_TELLS = (
 
 def _contains_spam_tell(body: str) -> str | None:
     """Return the matched spam-tell phrase, or None if clean."""
-    low = body.lower()
+    # Typographic apostrophes first: a model writes "I'd love to connect" with
+    # U+2019, and every entry here is written with an ASCII quote. Without this
+    # the phrase matches nothing and goes out.
+    low = _normalise_quotes(body.lower())
     for phrase in SPAM_TELLS:
         if phrase in low:
             return phrase
@@ -149,6 +152,7 @@ _PAIN_CLAIM_PATTERNS = (
 
 def _contains_unsupported_pain_claim(body: str) -> str | None:
     """Return the phrase asserting an unevidenced problem, or None if clean."""
+    body = _normalise_quotes(body)
     for pattern in _PAIN_CLAIM_PATTERNS:
         match = pattern.search(body)
         if match:
@@ -184,6 +188,7 @@ _INFERRED_RELEVANCE_PATTERNS = (
 
 def _contains_inferred_relevance(body: str) -> str | None:
     """Return the reasoned-from-nothing relevance claim, or None if clean."""
+    body = _normalise_quotes(body)
     for pattern in _INFERRED_RELEVANCE_PATTERNS:
         match = pattern.search(body)
         if match:
@@ -214,10 +219,7 @@ _FILLER_TELLS = (
 )
 
 
-def _normalise_quotes(text: str) -> str:
-    """Curly apostrophes are what a model actually emits; match them too."""
-    return (text.replace("’", "'").replace("‘", "'")
-                .replace("“", '"').replace("”", '"'))
+_normalise_quotes = evidence_mod.normalise_quotes
 
 
 def _contains_filler(body: str) -> str | None:

@@ -137,6 +137,24 @@ _SIGNAL_RULES: tuple[tuple[str, re.Pattern, str, str], ...] = (
 )
 
 
+def normalise_quotes(text: str) -> str:
+    """Fold typographic quotes to ASCII before matching.
+
+    LinkedIn's composer and every phone keyboard produce U+2019, not an ASCII
+    apostrophe, so "We’re Hiring" is what actually arrives. Every pattern
+    written with a straight quote silently fails against it, and silently is
+    the problem: on 2026-09-04 a prospect who had posted three hiring ads in
+    two days was scored as having no signal at all, and got the cautious email
+    written for someone we know nothing about.
+
+    A missed signal costs a good email. In the spam gate the same gap lets
+    "I'd love to connect" reach a real person.
+    """
+    return (text.replace("’", "'").replace("‘", "'")
+                .replace("“", '"').replace("”", '"')
+                .replace("–", "-").replace("—", "-"))
+
+
 def detect_signals(posts) -> list[Evidence]:
     """Signals found in the prospect's own published text.
 
@@ -147,10 +165,11 @@ def detect_signals(posts) -> list[Evidence]:
     found: list[Evidence] = []
     seen: set[str] = set()
     for post in posts or []:
-        text = (getattr(post, "text", None) or
-                (post.get("text") if isinstance(post, dict) else "") or "")
-        if not text.strip():
+        raw = (getattr(post, "text", None) or
+               (post.get("text") if isinstance(post, dict) else "") or "")
+        if not raw.strip():
             continue
+        text = normalise_quotes(raw)
         for name, pattern, statement, licensed in _SIGNAL_RULES:
             if name in seen:
                 continue
