@@ -463,6 +463,37 @@ def _clean_output(raw: str) -> str:
 
 # -------------------------------------------------------------- public API
 
+@dataclass
+class DraftAttempt:
+    """What happened on one pass through the drafter.
+
+    Carries the verdict and never the draft. A rejected body is assembled from
+    a real person's scraped profile, and the trace it would land in is
+    diagnostic output that gets pasted into tickets and chat. The category and
+    reason say everything an operator needs — which gate fired and why — with
+    nothing about the prospect in them.
+    """
+
+    number: int
+    outcome: str                 # "accepted" | "rejected"
+    category: str | None = None  # the gate that fired, machine-readable
+    reason: str | None = None    # short human explanation, no draft content
+
+    def __str__(self) -> str:
+        if self.outcome == "accepted":
+            return f"attempt {self.number}: accepted"
+        return f"attempt {self.number}: rejected — {self.category}: {self.reason}"
+
+
+def _record(sink, number: int, outcome: str,
+            category: str | None = None, reason: str | None = None) -> None:
+    """Append an attempt to the caller's list, if it asked for one."""
+    if sink is None:
+        return
+    sink.append(DraftAttempt(number=number, outcome=outcome,
+                             category=category, reason=reason))
+
+
 def _shared_positioning() -> str:
     """The shared Cortivo brief, which holds the facts about us.
 
@@ -503,6 +534,7 @@ def draft(
     recent_posts: Sequence[dict] | None = None,
     max_attempts: int = MAX_DRAFT_ATTEMPTS,
     evidence: dict | None = None,
+    attempts_out: list | None = None,
 ) -> str:
     """Generate a draft, retrying on recoverable failures (oversize / empty /
     suspiciously short). Raises DrafterError when:
@@ -553,9 +585,14 @@ def draft(
         # INSUFFICIENT_CONTEXT is terminal — the drafter is telling us there
         # genuinely isn't enough signal. Retrying just wastes tokens.
         if body.strip() == INSUFFICIENT:
+            _record(attempts_out, attempt, "rejected",
+                    "insufficient_context",
+                    "the drafter judged the evidence too thin")
             raise DrafterError("INSUFFICIENT_CONTEXT — not enough signal to draft")
 
         if not body:
+            _record(attempts_out, attempt, "rejected", "empty_output",
+                    "the model returned nothing")
             last_failure = f"empty output (attempt {attempt})"
             retry_hint = (
                 "Your previous attempt returned an empty response. "
@@ -564,6 +601,8 @@ def draft(
             continue
 
         if len(body) > cap_max:
+            _record(attempts_out, attempt, "rejected", "length_over",
+                    f"{len(body)} chars, cap {cap_max}")
             last_failure = f"oversize {len(body)}/{cap_max} (attempt {attempt})"
             last_body_preview = body[:180]
             retry_hint = (
@@ -574,6 +613,8 @@ def draft(
             continue
 
         if len(body) < cap_min:
+            _record(attempts_out, attempt, "rejected", "length_under",
+                    f"{len(body)} chars, floor {cap_min}")
             last_failure = f"too short {len(body)}/{cap_min} (attempt {attempt})"
             last_body_preview = body
             retry_hint = (
@@ -589,6 +630,8 @@ def draft(
         # retry with a specific call-out.
         spam = _contains_spam_tell(body)
         if spam:
+            _record(attempts_out, attempt, "rejected", "spam_tell",
+                    f"{spam!r}")
             last_failure = f"spam tell {spam!r} (attempt {attempt})"
             last_body_preview = body
             retry_hint = (
@@ -605,6 +648,8 @@ def draft(
         # "personalised" output read as a mail merge.
         filler = _contains_filler(body)
         if filler:
+            _record(attempts_out, attempt, "rejected", "template_filler",
+                    f"{filler!r}")
             last_failure = f"template filler {filler!r} (attempt {attempt})"
             last_body_preview = body
             retry_hint = (
@@ -622,6 +667,8 @@ def draft(
         if enforce_pain_gate and not pain_licensed:
             claim = _contains_unsupported_pain_claim(body)
             if claim:
+                _record(attempts_out, attempt, "rejected", "unsupported_pain_claim",
+                        f"{claim!r} with no signal licensing it")
                 last_failure = f"unsupported pain claim {claim!r} (attempt {attempt})"
                 last_body_preview = body
                 retry_hint = (
@@ -642,6 +689,8 @@ def draft(
         if thin_evidence and not pain_licensed:
             inferred = _contains_inferred_relevance(body)
             if inferred:
+                _record(attempts_out, attempt, "rejected", "inferred_relevance",
+                        f"{inferred!r} reasoned from their role")
                 last_failure = f"inferred relevance {inferred!r} (attempt {attempt})"
                 last_body_preview = body
                 retry_hint = (
@@ -659,6 +708,8 @@ def draft(
         # clients, results, timelines and how we work.
         invented = evidence_mod.ungrounded_cortivo_claim(body, grounding)
         if invented:
+            _record(attempts_out, attempt, "rejected", "ungrounded_cortivo_claim",
+                    str(invented))
             last_failure = f"ungrounded Cortivo claim {invented!r} (attempt {attempt})"
             last_body_preview = body
             retry_hint = (
@@ -677,6 +728,8 @@ def draft(
         if kind.startswith("email"):
             tell = _contains_surveillance_tell(body)
             if tell:
+                _record(attempts_out, attempt, "rejected", "surveillance_tell",
+                        f"{tell!r}")
                 last_failure = f"surveillance tell {tell!r} (attempt {attempt})"
                 last_body_preview = body
                 retry_hint = (
@@ -690,6 +743,7 @@ def draft(
                 continue
 
         # All quality gates passed.
+        _record(attempts_out, attempt, "accepted")
         return body
 
     msg = f"all {max_attempts} drafter attempts failed; last={last_failure}"

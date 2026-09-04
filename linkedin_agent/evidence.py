@@ -460,9 +460,15 @@ def ungrounded_cortivo_claim(body: str,
                 # Report the longest first: the distinctive term is the one the
                 # drafter invented, and naming "spent" instead of
                 # "parallel-agent" makes for a retry hint that misdirects.
+                #
+                # The offending terms, never the sentence. This string reaches
+                # the run trace, and a trace is diagnostic output that gets
+                # pasted into tickets and chat -- quoting a rejected draft back
+                # into it would put a prospect's details somewhere nobody
+                # intended. The terms alone say what went wrong.
                 unknown.sort(key=len, reverse=True)
                 named = ", ".join(repr(w) for w in unknown[:3])
-                return f'"{clean[:70]}..." — {named} not in the brief'
+                return f"a claim about how we work, using {named} — not in the brief"
     return None
 
 
