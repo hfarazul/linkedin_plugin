@@ -60,6 +60,64 @@ def _emails(directory: Path) -> list[dict]:
     return out
 
 
+# The claim, not the phrasing. "a small AI-engineering studio" and "a small
+# engineering studio we run" are two wordings of one idea, and a reader who
+# saw both would notice the idea, not the difference.
+_CORTIVO_CLAIMS = (
+    ("small studio", re.compile(r"(?i)small\s+(?:ai[- ])?(?:engineering\s+)?studio")),
+    ("senior engineer + AI tooling",
+     re.compile(r"(?i)senior engineer[^.]{0,40}ai tooling|pair(?:ing)? a senior")),
+    ("custom software", re.compile(r"(?i)custom software")),
+    ("without hiring a team",
+     re.compile(r"(?i)without (?:hiring|standing up)|rather not hire|"
+                r"instead of hiring|not have to hire")),
+    ("we build software for X", re.compile(r"(?i)we build software")),
+    ("outside engineering support",
+     re.compile(r"(?i)outside (?:engineering|engineers|help|capacity)")),
+    ("equivalent of an N-person team", re.compile(r"(?i)equivalent of a")),
+    ("ships in N weeks", re.compile(r"(?i)\d+\s*-\s*\d+\s*weeks")),
+    ("contract / extra capacity",
+     re.compile(r"(?i)contract capacity|extra capacity|build capacity")),
+)
+
+# How the email gets from silence to the observation. A shared opening move is
+# as much a tell as a shared closing one.
+_MARKERS = (
+    ("Your post about…", re.compile(r"(?i)\byour post\b")),
+    ("You wrote…", re.compile(r"(?i)\byou wrote\b")),
+    ("Saw you / I saw…", re.compile(r"(?i)\b(?:saw|i saw) you\b")),
+    ("I noticed…", re.compile(r"(?i)\bi noticed\b")),
+    ("The part about…", re.compile(r"(?i)\bthe part (?:about|that|where)\b")),
+    ("caught my eye", re.compile(r"(?i)caught my eye")),
+    ("stood out / stuck with me",
+     re.compile(r"(?i)stood out|stuck with me|stayed with me")),
+    ("made me laugh/smile", re.compile(r"(?i)made me (?:laugh|smile)")),
+    ("I keep thinking about", re.compile(r"(?i)keep thinking about")),
+    ("that's why I'm writing",
+     re.compile(r"(?i)(?:that's )?why i'm writing|the reason i'm writing")),
+    ("no list / not a list",
+     re.compile(r"(?i)\bno list\b|not (?:going to )?a list|pulled you off")),
+)
+
+
+def _cta_category(sentence: str) -> str:
+    """What the ask does, rather than how it is worded."""
+    s = sentence.lower()
+    if re.search(r"no worries|no hard feelings|won't (?:chase|follow)", s):
+        return "explicit opt-out"
+    if re.search(r"compare notes", s):
+        return "offer to compare notes"
+    if re.search(r"overlap|anything you're working on", s):
+        return "asks about overlap"
+    if re.search(r"useful|worth", s):
+        return "asks if useful/worth it"
+    if re.search(r"relevant", s):
+        return "asks if relevant"
+    if "?" in sentence:
+        return "other question"
+    return "no question"
+
+
 def _sentences(body: str) -> list[str]:
     return [s.strip() for s in re.split(r"(?<=[.!?])\s+", body) if s.strip()]
 
@@ -119,6 +177,44 @@ def main() -> int:
         flag = "  <-- REPEATED" if count > 1 else ""
         say(f"  {count}x  {value}{flag}")
     say(f"  distinct introductions: {len(intros)}/{n}")
+
+    # Wording and claim are different fingerprints, and the second is the one
+    # that survives paraphrase. Eight syntactically distinct introductions
+    # still read as one author if six of them describe us the same way.
+    say("\nCORTIVO CLAIMS  (the concept, regardless of wording)")
+    for label, pattern in _CORTIVO_CLAIMS:
+        hits = sum(1 for e in emails if pattern.search(e["body"]))
+        if hits:
+            say(f'  "{label}"'.ljust(38) + f"{_bar(hits, n)} {hits}/{n}")
+
+    say("\nDISCOURSE MARKERS  (how the observation is introduced)")
+    for label, pattern in _MARKERS:
+        hits = sum(1 for e in emails if pattern.search(e["body"]))
+        if hits:
+            say(f'  "{label}"'.ljust(38) + f"{_bar(hits, n)} {hits}/{n}")
+
+    say("\nCTA CATEGORY  (what the ask actually does)")
+    cats = Counter(_cta_category(_sentences(e["body"])[-1]
+                                 if _sentences(e["body"]) else "")
+                   for e in emails)
+    for value, count in cats.most_common():
+        say(f"  {value:34} {_bar(count, n)} {count}/{n}")
+
+    say("\nRHYTHM  (sentences per email — is every one the same shape?)")
+    counts = Counter(len(_sentences(e["body"])) for e in emails)
+    for length in sorted(counts):
+        say(f"  {length:2} sentences  {_bar(counts[length], n)} {counts[length]}/{n}")
+    lengths = [len(_sentences(e["body"])) for e in emails]
+    words = [len(re.findall(r"[a-z']+", e['body'].lower())) for e in emails]
+    say(f"  mean {sum(lengths)/n:.1f} sentences, {sum(words)/n:.0f} words; "
+        f"range {min(lengths)}-{max(lengths)} sentences")
+
+    say("\nSHAPE x CLOSING  (do the two rotations move together?)")
+    pairs = Counter((e["shape"], e["closing"]) for e in emails)
+    for (shape, close), count in pairs.most_common(10):
+        flag = "  <-- REPEATED PAIR" if count > 2 else ""
+        say(f"  {count}x  {shape} + {close}{flag}")
+    say(f"  distinct pairings: {len(pairs)}/{n}")
 
     say("\nREPEATED PHRASES  (6 words, appearing in 2+ drafts)")
     seen = Counter()
