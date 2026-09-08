@@ -380,7 +380,11 @@ def main() -> int:
                 # Shape is picked from the prospect, not the model's habits.
                 shape = evidence_mod.choose_shape(bundle, facts.provider_id
                                                   or linkedin_url)
+                closing = evidence_mod.choose_closing(facts.provider_id
+                                                      or linkedin_url)
                 st.note("email_shape", shape.name)
+                st.note("closing_register", closing.name)
+                st.note("names_uncertainty", closing.names_uncertainty)
                 st.note("shapes_available",
                         [x.name for x in evidence_mod.available_shapes(bundle)])
                 if bundle.tier is evidence_mod.Tier.NONE:
@@ -409,7 +413,7 @@ def main() -> int:
                         args.kind, prospect_id,
                         recent_posts=[{"text": p.text, "posted_at": p.posted_at}
                                       for p in posts],
-                        evidence=bundle.as_dict(shape),
+                        evidence=bundle.as_dict(shape, closing),
                         attempts_out=tries)
                     drafted_subject, body = drafter_mod.parse_email(raw)
                     _note_attempts(st, tries)

@@ -264,7 +264,8 @@ class EvidenceBundle:
             return Tier.WEAK
         return Tier.NONE
 
-    def as_dict(self, shape: "EmailShape | None" = None) -> dict:
+    def as_dict(self, shape: "EmailShape | None" = None,
+                closing: "Closing | None" = None) -> dict:
         payload = {
             "tier": self.tier.value,
             "pain_claim_licensed": self.pain_claim_licensed,
@@ -277,6 +278,13 @@ class EvidenceBundle:
         }
         if shape is not None:
             payload["shape"] = {"name": shape.name, "outline": shape.outline}
+        if closing is not None:
+            payload["closing"] = {
+                "name": closing.name,
+                "register": closing.register,
+                "example": closing.example,
+                "names_uncertainty": closing.names_uncertainty,
+            }
         return payload
 
 
@@ -583,6 +591,65 @@ def available_shapes(bundle: "EvidenceBundle") -> list[EmailShape]:
     return out
 
 
+_PROOF_POINT_RE = re.compile(r"\*\*([A-Z][^*]{2,40})\*\*")
+
+
+def proof_points(brief: str) -> list[str]:
+    """The named things we have actually built, from the brief's own markup.
+
+    The brief bolds them -- **Experial**, **Microforge**, **Mastercard** -- so
+    the list comes from the document rather than a copy that drifts from it.
+    """
+    names = []
+    for raw in _PROOF_POINT_RE.findall(brief or ""):
+        name = raw.split("(")[0].strip().rstrip(".,")
+        if name and name.lower() not in {"yes", "no"}:
+            names.append(name)
+    return names
+
+
+def missing_shape_elements(body: str, shape: EmailShape,
+                           bundle: "EvidenceBundle",
+                           brief: str = "") -> list[str]:
+    """Slots the chosen shape promised that the draft did not deliver.
+
+    Selecting a shape and checking it was followed are different things, and
+    only the first was happening: Soumya's draft was assigned
+    `observation_experience_question` and returned positioning where the
+    concrete example should have been. The shape was honoured in order and
+    ignored in substance.
+
+    Deliberately partial. Two slots are mechanically checkable and are
+    checked; the rest -- "is this a real observation", "is this one sentence
+    of hypothesis" -- are judgement, and a regex pretending to measure them
+    would fail the wrong drafts. Those stay the prompt's job.
+    """
+    missing: list[str] = []
+    low = body.lower()
+
+    if "?" not in body:
+        missing.append("a question to answer")
+
+    if shape.name == "observation_experience_question":
+        named = proof_points(brief)
+        if named and not any(p.lower() in low for p in named):
+            missing.append("a concrete thing we have built, by name")
+
+    if shape.name == "two_observations_question":
+        # Each observation is matched on its own distinctive words rather than
+        # on any single keyword, so a passing draft has to have engaged with
+        # two of them and not merely mentioned one twice.
+        referenced = 0
+        for obs in bundle.observations:
+            words = {w for w in re.findall(r"[a-z]{5,}", (obs.detail or "").lower())}
+            if words and len(words & set(re.findall(r"[a-z]{5,}", low))) >= 2:
+                referenced += 1
+        if referenced < 2:
+            missing.append(f"a second distinct observation (found {referenced})")
+
+    return missing
+
+
 def choose_shape(bundle: "EvidenceBundle", key: str | None) -> EmailShape:
     """Pick one shape, stably, from what the evidence supports.
 
@@ -595,6 +662,80 @@ def choose_shape(bundle: "EvidenceBundle", key: str | None) -> EmailShape:
         return _SHAPES[0]
     digest = hashlib.sha256((key or "").encode("utf-8")).digest()
     return options[digest[0] % len(options)]
+
+
+# -------------------------------------------------------------- the closing
+#
+# "I've no idea whether that's relevant — would it be?" turned up in two of
+# three drafts after the shape fix. The shape rotation broke the paragraph
+# order and the closing simply became the next fingerprint: honesty is right,
+# but honesty arriving in the same words every time is a template with good
+# manners.
+#
+# The fix is not to ban the sentence. It is to vary the register, and to
+# sometimes not name the uncertainty at all -- a question that assumes nothing
+# already carries it. "Is outside engineering support something you'd consider
+# while those roles are open?" is more natural than announcing that we do not
+# know, and says the same thing.
+#
+# These are registers, not strings to paste. The example shows the tone; the
+# drafter writes its own words in it, or we have swapped one template for seven.
+
+
+@dataclass(frozen=True)
+class Closing:
+    name: str
+    register: str
+    example: str
+    names_uncertainty: bool
+
+
+_CLOSINGS: tuple[Closing, ...] = (
+    Closing("direct_offer",
+            "Ask about the specific thing you observed, assuming nothing. Do "
+            "NOT say you don't know whether it is relevant -- the question "
+            "already carries that.",
+            "Is outside engineering support something you'd consider while "
+            "those roles are open?",
+            False),
+    Closing("usefulness",
+            "Ask plainly whether it would be useful. No hedging sentence "
+            "before it.",
+            "Would this be useful on your side?",
+            False),
+    Closing("overlap",
+            "Ask whether it touches anything they are actually working on.",
+            "Does that overlap with anything you're working on?",
+            False),
+    Closing("worth_it",
+            "Offer the conversation and the refusal in the same breath.",
+            "Worth a conversation, or not really?",
+            False),
+    Closing("easy_out",
+            "Give them an explicit way to ignore it. Warm, not apologetic.",
+            "If none of that is on your plate, no worries at all.",
+            True),
+    Closing("compare_notes",
+            "Make the offer conditional on it landing, and keep it light.",
+            "If it is, happy to compare notes.",
+            True),
+    Closing("curious",
+            "Name your own uncertainty once, briefly, then stop. One short "
+            "sentence -- not a paragraph of throat-clearing.",
+            "Curious whether this is relevant for you.",
+            True),
+)
+
+
+def choose_closing(key: str | None) -> Closing:
+    """Pick the closing register for this prospect.
+
+    Salted differently from the shape so the two do not move together: if
+    shape and closing were drawn from the same byte, a reader would see five
+    fixed combinations rather than a spread.
+    """
+    digest = hashlib.sha256(f"closing:{key or ''}".encode("utf-8")).digest()
+    return _CLOSINGS[digest[0] % len(_CLOSINGS)]
 
 
 # ------------------------------------------------------------ subject + ask

@@ -384,6 +384,20 @@ def render_prompt(inp: DrafterInput, retry_hint: str | None = None) -> str:
         # a rule buried in a payload field competes with everything else in
         # the payload for the model's attention.
         licensed = inp.evidence.get("pain_claim_licensed")
+        close = inp.evidence.get("closing")
+        if close:
+            uncertainty = (
+                "You may name your uncertainty ONCE, briefly."
+                if close.get("names_uncertainty") else
+                "Do NOT write a sentence saying you don't know whether this "
+                "is relevant. The question carries it."
+            )
+            closing = (
+                f"HOW TO CLOSE — {close['name']}: {close['register']} "
+                f"{uncertainty}\n"
+                f"Register example (do NOT reuse this wording, write your "
+                f"own in this register): \"{close['example']}\"\n\n{closing}"
+            )
         shape = inp.evidence.get("shape")
         if shape:
             closing = (
@@ -528,6 +542,25 @@ def _record(sink, number: int, outcome: str,
         return
     sink.append(DraftAttempt(number=number, outcome=outcome,
                              category=category, reason=reason))
+
+
+def shape_gaps(body: str, evidence: dict, brief: str) -> list[str]:
+    """Which of the chosen shape's parts the draft failed to deliver."""
+    shape_name = (evidence.get("shape") or {}).get("name")
+    if not shape_name:
+        return []
+    for shape in evidence_mod._SHAPES:
+        if shape.name != shape_name:
+            continue
+        # The bundle is already flattened into `evidence` by this point, so a
+        # light stand-in carries the one field the checks read.
+        bundle = evidence_mod.EvidenceBundle(items=[
+            evidence_mod.Evidence(kind=evidence_mod.EvidenceKind.OBSERVATION,
+                                  statement="", source="",
+                                  detail=o.get("detail", ""))
+            for o in evidence.get("observations", [])])
+        return evidence_mod.missing_shape_elements(body, shape, bundle, brief)
+    return []
 
 
 def _shared_positioning() -> str:
@@ -792,9 +825,23 @@ def draft(
         # one with one, and far better than no email at all. A correctness
         # gate above would rather send nothing; this one would not.
         soft = _overuses_dashes(body)
+        soft_category = "dash_overuse"
+        if not soft and inp.evidence and inp.evidence.get("shape"):
+            # Selecting a shape and checking it was followed are different
+            # things, and only the first was happening.
+            gaps = shape_gaps(measured, inp.evidence, grounding.text)
+            if gaps:
+                soft, soft_category = "; ".join(gaps), "shape_unfulfilled"
         if soft and attempt < max_attempts:
-            _record(attempts_out, attempt, "rejected", "dash_overuse", soft)
+            _record(attempts_out, attempt, "rejected", soft_category, soft)
             last_failure = f"dash overuse {soft} (attempt {attempt})"
+            if soft_category == "shape_unfulfilled":
+                retry_hint = (
+                    f"Your previous attempt did not deliver what the shape "
+                    f"asked for: missing {soft}. Follow the SHAPE section "
+                    f"above -- it names the parts this email needs."
+                )
+                continue
             retry_hint = (
                 f"Your previous attempt used {soft}. You are leaning on the "
                 f"dash to join an observation to its explanation, which is "
@@ -807,7 +854,7 @@ def draft(
         # All quality gates passed. A surviving soft issue is recorded on the
         # accepted attempt rather than hidden — the draft went out with it.
         _record(attempts_out, attempt, "accepted",
-                "style_warning" if soft else None, soft)
+                soft_category if soft else None, soft)
         return body
 
     msg = f"all {max_attempts} drafter attempts failed; last={last_failure}"

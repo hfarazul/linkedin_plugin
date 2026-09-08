@@ -225,7 +225,9 @@ def test_a_surviving_style_issue_is_recorded_not_hidden(monkeypatch) -> None:
     _, tries, _ = _drive(monkeypatch, [STYLED], max_attempts=1)
     accepted = tries[-1]
     assert accepted.outcome == "accepted"
-    assert accepted.category == "style_warning"
+    # Named, not a generic "style_warning": which soft gate survived is the
+    # part worth knowing when you read the trace back.
+    assert accepted.category == "dash_overuse"
     assert "dashes" in (accepted.reason or "")
 
 
@@ -289,3 +291,114 @@ def test_content_gates_still_see_the_subject(monkeypatch) -> None:
            + "Hi there, this body is otherwise entirely fine and long "
              "enough to clear the floor without any trouble at all. " * 3)
     assert d._contains_filler(raw) is not None
+
+
+# ======================= closing rotation ====================================
+# "I've no idea whether that's relevant — would it be?" appeared in two of the
+# three drafts after the shape fix: the rotation broke the paragraph order and
+# the closing simply became the next fingerprint.
+
+@pytest.mark.unit
+def test_closings_spread_across_a_list() -> None:
+    from linkedin_agent.evidence import choose_closing
+    chosen = {choose_closing(f"https://linkedin.com/in/p{i}").name
+              for i in range(40)}
+    assert len(chosen) >= 5, f"closings collapsed to {chosen}"
+
+
+@pytest.mark.unit
+def test_most_closings_do_not_name_uncertainty() -> None:
+    """A question that assumes nothing already carries the uncertainty.
+    Saying it out loud every time is what made it a template."""
+    from linkedin_agent.evidence import _CLOSINGS
+    silent = [c for c in _CLOSINGS if not c.names_uncertainty]
+    assert len(silent) > len(_CLOSINGS) / 2
+
+
+@pytest.mark.unit
+def test_the_closing_is_stable_per_prospect_but_independent_of_shape() -> None:
+    """Salted separately, or a reader sees five fixed pairings instead of a
+    spread across both."""
+    from linkedin_agent.evidence import choose_closing
+    key = "https://www.linkedin.com/in/soumyavmurthy/"
+    assert choose_closing(key).name == choose_closing(key).name
+    pairs = {(choose_shape(LICENSED, f"p{i}").name,
+              choose_closing(f"p{i}").name) for i in range(40)}
+    assert len(pairs) >= 10, f"shape and closing move together: {pairs}"
+
+
+@pytest.mark.unit
+def test_a_silent_closing_forbids_the_uncertainty_sentence() -> None:
+    from linkedin_agent.evidence import _CLOSINGS
+    silent = next(c for c in _CLOSINGS if not c.names_uncertainty)
+    inp = d.DrafterInput(kind="email1", campaign={}, prospect={},
+                         evidence=LICENSED.as_dict(closing=silent))
+    prompt = d.render_prompt(inp)
+    assert "Do NOT write a sentence saying you don't know" in prompt
+    assert "do NOT reuse this wording" in prompt, \
+        "the example is a register, not a string to paste"
+
+
+# ======================= shape fulfilment ====================================
+# Soumya's draft was assigned observation_experience_question and returned
+# positioning where the concrete example should have been. The shape was
+# honoured in order and ignored in substance.
+
+BRIEF = ("- **Experial** (Haque) — built the survey-generation agent.\n"
+         "- **Microforge** — agentic platform used by a16z.\n")
+
+
+@pytest.mark.unit
+def test_the_experience_shape_needs_a_named_proof_point() -> None:
+    from linkedin_agent.evidence import _SHAPES, missing_shape_elements
+    shape = next(s for s in _SHAPES
+                 if s.name == "observation_experience_question")
+    vague = ("You wrote about on-call. We pair a senior engineer with AI "
+             "tooling and build software that way. Would it be relevant?")
+    concrete = ("You wrote about on-call. We built Microforge, an agentic "
+                "platform, which is the closest thing we've done. Relevant?")
+    assert missing_shape_elements(vague, shape, THIN, BRIEF)
+    assert not missing_shape_elements(concrete, shape, THIN, BRIEF)
+
+
+@pytest.mark.unit
+def test_proof_points_come_from_the_brief_not_a_hardcoded_list() -> None:
+    from linkedin_agent.evidence import proof_points
+    assert proof_points(BRIEF) == ["Experial", "Microforge"]
+    assert proof_points("") == []
+
+
+@pytest.mark.unit
+def test_every_shape_requires_a_question() -> None:
+    from linkedin_agent.evidence import _SHAPES, missing_shape_elements
+    for shape in _SHAPES:
+        gaps = missing_shape_elements("A statement with no ask.", shape,
+                                      THIN, BRIEF)
+        assert any("question" in g for g in gaps), shape.name
+
+
+@pytest.mark.unit
+def test_unfulfilled_shape_drives_a_retry_then_yields(monkeypatch) -> None:
+    """Same soft contract as dashes: re-prompt while there is budget, but a
+    structural preference must not cost us the email."""
+    from linkedin_agent.evidence import _SHAPES
+    shape = next(s for s in _SHAPES
+                 if s.name == "observation_experience_question")
+    vague = ("Hi there,\n\nYou wrote about inheriting on-call, and the part "
+             "about documentation stayed with me for a while afterwards.\n\n"
+             "I run Cortivo, a small studio. We pair a senior engineer with "
+             "AI tooling and build software that way for people.\n\n"
+             "Would this be relevant on your side?\n\nBest,\nHaque")
+    seen = []
+    monkeypatch.setattr(d, "_invoke_claude",
+                        lambda p, timeout=90: (seen.append(p), vague)[1])
+    monkeypatch.setattr(d, "build_input",
+                        lambda kind, pid, recent_posts=None, evidence=None:
+                        d.DrafterInput(kind=kind, campaign={"brief": ""},
+                                       prospect={}, evidence=evidence))
+    tries: list = []
+    out = d.draft("email1", 1, evidence=THIN.as_dict(shape),
+                  attempts_out=tries, max_attempts=2)
+    assert out == vague, "a structural gap must not destroy the draft"
+    assert tries[0].category == "shape_unfulfilled"
+    assert "shape asked for" in seen[1]
