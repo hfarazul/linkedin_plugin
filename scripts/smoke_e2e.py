@@ -239,13 +239,6 @@ def main() -> int:
                                   full_name=facts.full_name,
                                   headline=facts.headline,
                                   location=facts.location)
-                if args.skip_role:
-                    icp = replace(icp, role_required=re.compile(r""))
-                if args.skip_geo:
-                    # Replace the campaign's pattern rather than patching the
-                    # result, so geo_match reports what was actually evaluated
-                    # instead of a hand-set True.
-                    icp = replace(icp, geo_required=re.compile(r""))
                 # Every role they currently hold, not just the one their
                 # headline leads with. Anjan B is a co-founder of one company
                 # and an engineer at another; his headline names only the
@@ -254,7 +247,30 @@ def main() -> int:
                 current_titles = [pos.title for pos in facts.positions
                                   if pos.is_current and pos.title]
                 st.note("titles_considered", current_titles or "(headline only)")
-                result = grade(hit, icp, titles=current_titles)
+
+                # Grade against the campaign's REAL rules first, always. A
+                # bypass replaces the pattern, so grading only once loses the
+                # answer to "why would this person have been dropped?" — the
+                # thing you actually want to know on a run that bypasses the
+                # gate in order to see the rest of the pipeline.
+                verdict = grade(hit, icp, titles=current_titles)
+                blockers = [name for name, ok in
+                            (("geo", verdict.geo_match),
+                             ("role", verdict.role_match),
+                             ("noise", verdict.noise_excluded)) if not ok]
+                st.note("would_block_on", ", ".join(blockers) or "nothing")
+                for note in verdict.notes:
+                    st.note("icp_detail", note)
+
+                if args.skip_role:
+                    icp = replace(icp, role_required=re.compile(r""))
+                if args.skip_geo:
+                    # Replace the campaign's pattern rather than patching the
+                    # result, so geo_match reports what was actually evaluated
+                    # instead of a hand-set True.
+                    icp = replace(icp, geo_required=re.compile(r""))
+                result = (verdict if not (args.skip_geo or args.skip_role)
+                          else grade(hit, icp, titles=current_titles))
                 st.note("geo_bypassed", bool(args.skip_geo))
                 st.note("role_bypassed", bool(args.skip_role))
                 st.note("geo_match", result.geo_match)
