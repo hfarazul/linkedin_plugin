@@ -377,6 +377,12 @@ def main() -> int:
                 st.note("observations", len(bundle.observations))
                 st.note("signals", [e.source for e in bundle.signals] or "none")
                 st.note("unknowns", len(bundle.unknowns))
+                # Shape is picked from the prospect, not the model's habits.
+                shape = evidence_mod.choose_shape(bundle, facts.provider_id
+                                                  or linkedin_url)
+                st.note("email_shape", shape.name)
+                st.note("shapes_available",
+                        [x.name for x in evidence_mod.available_shapes(bundle)])
                 if bundle.tier is evidence_mod.Tier.NONE:
                     st.status = trace.SKIP
                     st.why("no specific facts to personalize from — the drafter "
@@ -403,7 +409,7 @@ def main() -> int:
                         args.kind, prospect_id,
                         recent_posts=[{"text": p.text, "posted_at": p.posted_at}
                                       for p in posts],
-                        evidence=bundle.as_dict(),
+                        evidence=bundle.as_dict(shape),
                         attempts_out=tries)
                     drafted_subject, body = drafter_mod.parse_email(raw)
                     _note_attempts(st, tries)
@@ -455,6 +461,10 @@ def main() -> int:
                 st.note("template_filler", filler or "none")
                 st.note("unsupported_pain_claim", pain or "none")
                 st.note("inferred_relevance", inferred or "none")
+                dashes = drafter_mod.count_connector_dashes(body)
+                st.note("connector_dashes",
+                        f"{dashes} (soft limit "
+                        f"{drafter_mod.MAX_CONNECTOR_DASHES})")
                 st.note("ungrounded_cortivo_claim", invented or "none")
                 st.note("spam_tell", spam or "none")
                 if args.kind.startswith("email"):

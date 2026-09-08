@@ -58,7 +58,7 @@ KIND_MIN_CHARS = {
     # one-word ack is almost always wrong on first reply. 80 keeps room for
     # acknowledge + content + sign-off.
     "reply": 80,
-    "email1": 300,
+    "email1": 250,
 }
 
 # Auto-retry budget. The drafter is stochastic — a fresh `claude -p` call
@@ -184,6 +184,32 @@ _INFERRED_RELEVANCE_PATTERNS = (
     re.compile(r"(?i)\bthat(?:'s| is) (?:usually|often|typically) (?:where|when)\b"),
     re.compile(r"(?i)\bin (?:my|our) experience,? (?:teams|companies|operators)\b"),
 )
+
+
+# Dashes used as connective tissue. Not banned: people use them, and a rule
+# that forbids them outright produces prose that reads artificially
+# constrained, which is the same tell from the other direction.
+#
+# The problem is density and sameness. Across five real drafts the em dash
+# appeared in nearly every sentence that joined an observation to an
+# explanation, always the same construction, and combined with balanced
+# clauses and careful hedging it produced an unmistakable copywriter texture.
+# One is fine. Three is a fingerprint.
+_DASH_CONNECTORS = ("—", "–", " - ")
+
+MAX_CONNECTOR_DASHES = 1
+
+
+def count_connector_dashes(body: str) -> int:
+    return sum(body.count(d) for d in _DASH_CONNECTORS)
+
+
+def _overuses_dashes(body: str) -> str | None:
+    """Return a description when dashes are doing too much of the joining."""
+    n = count_connector_dashes(body)
+    if n > MAX_CONNECTOR_DASHES:
+        return f"{n} dashes (soft limit {MAX_CONNECTOR_DASHES})"
+    return None
 
 
 def _contains_inferred_relevance(body: str) -> str | None:
@@ -358,6 +384,14 @@ def render_prompt(inp: DrafterInput, retry_hint: str | None = None) -> str:
         # a rule buried in a payload field competes with everything else in
         # the payload for the model's attention.
         licensed = inp.evidence.get("pain_claim_licensed")
+        shape = inp.evidence.get("shape")
+        if shape:
+            closing = (
+                f"SHAPE FOR THIS EMAIL — {shape['name']}: {shape['outline']}\n\n"
+                f"Follow it. Left alone you settle into one order for every "
+                f"prospect, and across a hundred sends that order is the "
+                f"tell.\n\n{closing}"
+            )
         closing = (
             f"Evidence tier for this prospect: "
             f"{inp.evidence.get('tier')}. "
@@ -592,6 +626,14 @@ def draft(
                     "the drafter judged the evidence too thin")
             raise DrafterError("INSUFFICIENT_CONTEXT — not enough signal to draft")
 
+        # Length applies to the message, not to the subject line the drafter
+        # emits above it. Measuring the raw output let a 292-char body pass a
+        # 300-char floor because "Subject: your SDET and AI security roles"
+        # made up the difference — the gate and the validation stage were
+        # measuring two different strings. Content gates below still see the
+        # subject, because a subject can carry a spam tell or a stock phrase.
+        measured = parse_email(body)[1] if kind.startswith("email") else body
+
         if not body:
             _record(attempts_out, attempt, "rejected", "empty_output",
                     "the model returned nothing")
@@ -602,25 +644,25 @@ def draft(
             )
             continue
 
-        if len(body) > cap_max:
+        if len(measured) > cap_max:
             _record(attempts_out, attempt, "rejected", "length_over",
-                    f"{len(body)} chars, cap {cap_max}")
-            last_failure = f"oversize {len(body)}/{cap_max} (attempt {attempt})"
+                    f"{len(measured)} chars, cap {cap_max}")
+            last_failure = f"oversize {len(measured)}/{cap_max} (attempt {attempt})"
             last_body_preview = body[:180]
             retry_hint = (
-                f"Your previous attempt was {len(body)} characters; the cap for "
+                f"Your previous attempt was {len(measured)} characters; the cap for "
                 f"`{kind}` is {cap_max}. Be tighter. Cut the second sentence "
                 f"if you have to. Keep only the most specific reference."
             )
             continue
 
-        if len(body) < cap_min:
+        if len(measured) < cap_min:
             _record(attempts_out, attempt, "rejected", "length_under",
-                    f"{len(body)} chars, floor {cap_min}")
-            last_failure = f"too short {len(body)}/{cap_min} (attempt {attempt})"
+                    f"{len(measured)} chars, floor {cap_min}")
+            last_failure = f"too short {len(measured)}/{cap_min} (attempt {attempt})"
             last_body_preview = body
             retry_hint = (
-                f"Your previous attempt was only {len(body)} characters, which "
+                f"Your previous attempt was only {len(measured)} characters, which "
                 f"is below the {cap_min}-char minimum for a substantive "
                 f"`{kind}`. Add a specific reference from the prospect's post "
                 f"or profile and a real question. Do not return a single line."
@@ -744,8 +786,28 @@ def draft(
                 )
                 continue
 
-        # All quality gates passed.
-        _record(attempts_out, attempt, "accepted")
+        # ---- soft gates -------------------------------------------------
+        # Style, not truth. These re-prompt while there is budget left, but
+        # never destroy a draft: an email with two dashes in it is worse than
+        # one with one, and far better than no email at all. A correctness
+        # gate above would rather send nothing; this one would not.
+        soft = _overuses_dashes(body)
+        if soft and attempt < max_attempts:
+            _record(attempts_out, attempt, "rejected", "dash_overuse", soft)
+            last_failure = f"dash overuse {soft} (attempt {attempt})"
+            retry_hint = (
+                f"Your previous attempt used {soft}. You are leaning on the "
+                f"dash to join an observation to its explanation, which is "
+                f"the punctuation habit that makes writing read as generated. "
+                f"Use commas, or start a new sentence. At most one dash in "
+                f"the whole email, and only where it genuinely reads better."
+            )
+            continue
+
+        # All quality gates passed. A surviving soft issue is recorded on the
+        # accepted attempt rather than hidden — the draft went out with it.
+        _record(attempts_out, attempt, "accepted",
+                "style_warning" if soft else None, soft)
         return body
 
     msg = f"all {max_attempts} drafter attempts failed; last={last_failure}"

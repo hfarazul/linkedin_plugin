@@ -48,6 +48,7 @@ behaviour being removed.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -102,19 +103,32 @@ class Evidence:
 # about the thing they said, and never widens into "so you must also have...".
 _SIGNAL_RULES: tuple[tuple[str, re.Pattern, str, str], ...] = (
     (
+        # First person, always. "open role" and "funding round" on their own
+        # match a recruiter describing a CLIENT, and that is exactly what
+        # happened: Vinay Goel's post said a placement was joining "following
+        # their recent funding round" -- StudentCrowd's round, not his -- and
+        # the bare `funding round` alternative licensed a claim that he was
+        # under pressure to ship what he had raised. He had raised nothing.
+        #
+        # Anyone whose job is writing about other companies -- recruiters,
+        # agencies, investors, consultants -- trips a signal that does not
+        # require the author to be the subject.
         "hiring_engineers",
-        re.compile(r"(?i)\b(?:we(?:'re| are) hiring|now hiring|join(?:ing)? our "
-                   r"team|looking for an? (?:exceptional |senior |experienced )?"
-                   r"(?:engineer|developer|dev\b)|open role|we are looking for "
-                   r"an? (?:exceptional )?candidate)"),
+        re.compile(r"(?i)\b(?:we(?:'re| are) hiring|we are now hiring|"
+                   r"join(?:ing)? our team|"
+                   r"we(?:'re| are) looking for an? (?:exceptional |senior |"
+                   r"experienced )?(?:engineer|developer|dev\b|candidate)|"
+                   r"our (?:team|company) is hiring)"),
         "they are hiring",
         "they are adding build capacity right now",
     ),
     (
         "fundraise",
-        re.compile(r"(?i)\b(?:we(?:'ve| have)? (?:just )?raised|closed our "
-                   r"(?:seed|series [a-d])|(?:seed|series [a-d]) round|"
-                   r"funding round|thrilled to announce .{0,40}raise)"),
+        re.compile(r"(?i)\b(?:we(?:'ve| have)? (?:just )?raised|"
+                   r"(?:we|i)(?:'ve| have)? closed our (?:seed|series [a-d])|"
+                   r"closed our (?:seed|series [a-d])|"
+                   r"our (?:seed|series [a-d]|funding) round|"
+                   r"thrilled to announce (?:our|we)[^.]{0,40}rais)"),
         "they announced a raise",
         "they are under pressure to ship what the raise was raised for",
     ),
@@ -250,8 +264,8 @@ class EvidenceBundle:
             return Tier.WEAK
         return Tier.NONE
 
-    def as_dict(self) -> dict:
-        return {
+    def as_dict(self, shape: "EmailShape | None" = None) -> dict:
+        payload = {
             "tier": self.tier.value,
             "pain_claim_licensed": self.pain_claim_licensed,
             "verified_facts": [e.as_dict() for e in self.facts],
@@ -261,6 +275,9 @@ class EvidenceBundle:
             "licensed_claims": [e.claim for e in self.items
                                 if e.licenses_pain_claim and e.claim],
         }
+        if shape is not None:
+            payload["shape"] = {"name": shape.name, "outline": shape.outline}
+        return payload
 
 
 def build_evidence(facts, posts=None, *, transition_is_direct: bool = False) -> EvidenceBundle:
@@ -489,6 +506,95 @@ def ungrounded_cortivo_claim(body: str,
                 named = ", ".join(repr(w) for w in unknown[:3])
                 return f"a claim about how we work, using {named} — not in the brief"
     return None
+
+
+# --------------------------------------------------------------- the shape
+#
+# Across five real drafts every single email came out in the same order:
+#
+#     observation -> interpretation -> Cortivo -> "I don't know if this is
+#     relevant" -> question
+#
+# Each one read well alone. All five together read as one author, and over a
+# hundred sends that order is the fingerprint -- the honest-uncertainty line
+# had quietly become the new template component, which is the same failure the
+# old filler was removed for, wearing a more likeable costume.
+#
+# So shape is chosen per prospect rather than left to the model, which will
+# otherwise settle into whatever order it likes best. Two rules:
+#
+#   * the evidence still decides what may be SAID; shape only decides the
+#     order it is said in, so this can never license a claim
+#   * selection is deterministic on the prospect, so re-running the same
+#     person is reproducible while a list of them spreads across the shapes
+
+
+@dataclass(frozen=True)
+class EmailShape:
+    name: str
+    outline: str
+    needs_licence: bool = False   # only where a signal permits a hypothesis
+    needs_two_observations: bool = False
+
+
+_SHAPES: tuple[EmailShape, ...] = (
+    EmailShape(
+        "observation_question",
+        "The observation, then the ask. Introduce Cortivo in a half-sentence "
+        "at most. Do NOT explain why the observation makes them relevant to "
+        "us -- leave the connection unmade and let the question carry it. "
+        "This should be the shortest email you write.",
+    ),
+    EmailShape(
+        "observation_bridge_question",
+        "The observation, one plain sentence on what Cortivo does, the ask. "
+        "No interpretation of their situation in between.",
+    ),
+    EmailShape(
+        "observation_experience_question",
+        "The observation, then one concrete thing we have actually built "
+        "that connects to it (from the brief, never invented), then the ask. "
+        "Let the example do the work instead of an explanation.",
+    ),
+    EmailShape(
+        "observation_hypothesis_question",
+        "The observation, ONE sentence of hypothesis tied to the signal, "
+        "then the ask. One sentence -- not a paragraph of reasoning.",
+        needs_licence=True,
+    ),
+    EmailShape(
+        "two_observations_question",
+        "Two specific things you noticed, a very short introduction, the "
+        "ask. The specificity carries this one; keep everything else minimal.",
+        needs_two_observations=True,
+    ),
+)
+
+
+def available_shapes(bundle: "EvidenceBundle") -> list[EmailShape]:
+    """The shapes this prospect's evidence can actually support."""
+    out = []
+    for shape in _SHAPES:
+        if shape.needs_licence and not bundle.pain_claim_licensed:
+            continue
+        if shape.needs_two_observations and len(bundle.observations) < 2:
+            continue
+        out.append(shape)
+    return out
+
+
+def choose_shape(bundle: "EvidenceBundle", key: str | None) -> EmailShape:
+    """Pick one shape, stably, from what the evidence supports.
+
+    Hashed on the prospect rather than randomised so a re-run of the same
+    person produces the same shape -- otherwise the drafter looks broken every
+    time you check your work, and A/B comparison is impossible.
+    """
+    options = available_shapes(bundle)
+    if not options:
+        return _SHAPES[0]
+    digest = hashlib.sha256((key or "").encode("utf-8")).digest()
+    return options[digest[0] % len(options)]
 
 
 # ------------------------------------------------------------ subject + ask
