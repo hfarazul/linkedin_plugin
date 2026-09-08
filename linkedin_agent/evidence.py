@@ -265,7 +265,9 @@ class EvidenceBundle:
         return Tier.NONE
 
     def as_dict(self, shape: "EmailShape | None" = None,
-                closing: "Closing | None" = None) -> dict:
+                closing: "Closing | None" = None,
+                positioning: "Positioning | None" = None,
+                proof_domain: str | None = None) -> dict:
         payload = {
             "tier": self.tier.value,
             "pain_claim_licensed": self.pain_claim_licensed,
@@ -281,9 +283,16 @@ class EvidenceBundle:
         if closing is not None:
             payload["closing"] = {
                 "name": closing.name,
-                "register": closing.register,
-                "example": closing.example,
+                "purpose": closing.purpose,
+                "examples": list(closing.examples),
                 "names_uncertainty": closing.names_uncertainty,
+            }
+        if positioning is not None:
+            payload["positioning"] = {
+                "name": positioning.name,
+                "angle": positioning.angle,
+                "fits_because": positioning.when,
+                "proof_domain": proof_domain,
             }
         return payload
 
@@ -664,6 +673,158 @@ def choose_shape(bundle: "EvidenceBundle", key: str | None) -> EmailShape:
     return options[digest[0] % len(options)]
 
 
+# ------------------------------------------------------------ positioning
+#
+# Across 25 drafts, 23 described Cortivo as "a small AI-engineering studio" --
+# 92% -- while only 12 shared an introduction *sentence*. Twelve wordings, one
+# claim. That is the fingerprint that survives paraphrase, and rotating the
+# sentence would not have touched it.
+#
+# The brief holds Experial with Coca-Cola and Bosch, Microforge with a16z, a
+# 6-10 week engagement, the 3-4 person-team equivalence. "ships in N weeks"
+# appeared once in twenty-five. The material was there and went unused.
+#
+# The fix is NOT seven fixed descriptions, which would recreate the problem one
+# level up. Each angle declares when it actually fits, and only angles that fit
+# this prospect are eligible; the hash then breaks the tie. So variation comes
+# from relevance first and rotation second -- otherwise every email names a
+# different Cortivo fact regardless of whether it belongs, which is its own
+# tell and a worse one, because it is also irrelevant.
+
+
+@dataclass(frozen=True)
+class Positioning:
+    name: str
+    angle: str
+    when: str
+
+
+_POSITIONING: tuple[Positioning, ...] = (
+    Positioning(
+        "extra_capacity",
+        "We take on senior build work as extra capacity, alongside whoever "
+        "is already there.",
+        "they are hiring, or said the team is stretched",
+    ),
+    Positioning(
+        "senior_plus_tooling",
+        "We pair one senior engineer with AI tooling, which is how a small "
+        "team gets through more than its headcount suggests.",
+        "they are technical, or wrote about how software gets built",
+    ),
+    Positioning(
+        "fast_focused_build",
+        "We take one defined thing and build it, rather than staffing a "
+        "long engagement.",
+        "they just shipped or launched something",
+    ),
+    Positioning(
+        "small_team_equivalent",
+        "One engineer of ours plus AI tooling is roughly what a founder "
+        "would otherwise hire three or four people to do.",
+        "they are a founder or run the company",
+    ),
+    Positioning(
+        "engagement_shape",
+        "A typical engagement runs six to ten weeks, kickoff to live users.",
+        "there is a concrete project in view -- they raised, or named "
+        "something they are about to build",
+    ),
+    Positioning(
+        "proof_point",
+        "Name the closest thing we have actually built, from the brief.",
+        "a proof point in the brief genuinely matches their world",
+    ),
+    Positioning(
+        "custom_software",
+        "We build the internal software that no vendor sells exactly, for "
+        "teams who would otherwise do it by hand.",
+        "they described a build, tooling or manual-process problem",
+    ),
+    Positioning(
+        "plain",
+        "Say what Cortivo is in the plainest terms and stop. A stranger who "
+        "has told us nothing is owed a short honest sentence, not a pitch "
+        "angle chosen for them.",
+        "nothing above fits -- this is the honest default, not a failure",
+    ),
+)
+
+# Which prospect worlds each proof point can honestly speak to. Keyword-matched
+# against their headline, company and posts, so a case study is only offered
+# where it actually lands.
+_PROOF_DOMAINS = {
+    "fintech, payments, wealth, investment":
+        re.compile(r"(?i)\b(fintech|payments?|banking|wealth|invest(?:ment|or)|"
+                   r"capital|fund|asset manage|private (?:debt|equity)|cfo)\b"),
+    "enterprise, brand, consumer goods":
+        re.compile(r"(?i)\b(enterprise|brand|fmcg|consumer goods|retail|"
+                   r"marketing|survey|research)\b"),
+    "venture capital and startup scouting":
+        re.compile(r"(?i)\b(venture|vc\b|portfolio|accelerator|angel)\b"),
+    "speed of delivery, campaign tooling":
+        re.compile(r"(?i)\b(campaign|launch|go.to.market|speed|time.to.market)\b"),
+}
+
+
+def _text_about(facts, bundle: "EvidenceBundle") -> str:
+    parts = [getattr(facts, "headline", "") or "",
+             getattr(facts, "company_name", "") or ""]
+    for pos in (getattr(facts, "positions", None) or [])[:2]:
+        parts += [pos.title or "", pos.company or ""]
+    parts += [e.detail or "" for e in bundle.observations]
+    return " ".join(parts)
+
+
+def _fits(angle: Positioning, facts, bundle: "EvidenceBundle") -> bool:
+    signals = {s.name for s in bundle.signals}
+    text = _text_about(facts, bundle)
+    if angle.name == "extra_capacity":
+        return "hiring_engineers" in signals
+    if angle.name == "fast_focused_build":
+        return "shipping_product" in signals
+    if angle.name == "custom_software":
+        return "build_pain" in signals
+    if angle.name == "engagement_shape":
+        return "fundraise" in signals
+    if angle.name == "senior_plus_tooling":
+        # Stems, not whole words: "Director of Engineering" is one of the
+        # commonest titles there is, and \bengineer\b does not match it.
+        return bool(re.search(r"(?i)\b(engineer(?:ing|s)?|developer|technical|"
+                              r"cto|software|platform|data|architect|devops|"
+                              r"product|build)\b", text))
+    if angle.name == "small_team_equivalent":
+        return bool(re.search(r"(?i)\b(founder|co-?founder|ceo|owner|"
+                              r"managing director)\b", text))
+    if angle.name == "proof_point":
+        return any(p.search(text) for p in _PROOF_DOMAINS.values())
+    return False        # "plain" is the fallback, never a positive match
+
+
+def matching_proof_domain(facts, bundle: "EvidenceBundle") -> str | None:
+    """Which of our worlds theirs resembles, if any."""
+    text = _text_about(facts, bundle)
+    for label, pattern in _PROOF_DOMAINS.items():
+        if pattern.search(text):
+            return label
+    return None
+
+
+def choose_positioning(facts, bundle: "EvidenceBundle",
+                       key: str | None) -> Positioning:
+    """The most relevant truthful angle, with the hash only breaking ties.
+
+    An angle that does not fit is never eligible. Nothing here licenses a
+    claim about the prospect -- it selects which true thing about US is worth
+    saying to them.
+    """
+    eligible = [a for a in _POSITIONING if _fits(a, facts, bundle)]
+    if not eligible:
+        return _POSITIONING[-1]         # plain
+    digest = hashlib.sha256(f"pos:{key or ''}".encode("utf-8")).digest()
+    return eligible[digest[0] % len(eligible)]
+
+
 # -------------------------------------------------------------- the closing
 #
 # "I've no idea whether that's relevant — would it be?" turned up in two of
@@ -684,45 +845,75 @@ def choose_shape(bundle: "EvidenceBundle", key: str | None) -> EmailShape:
 
 @dataclass(frozen=True)
 class Closing:
+    """A conversational exit, described by intent rather than by wording.
+
+    The first version carried one short example and an instruction not to
+    reuse it. Across 25 drafts the `compare_notes` register reproduced its
+    example verbatim 4 times out of 4: a single short phrase is not a
+    register, it is a string to memorise, and telling a model not to copy the
+    only example it has been given does not work.
+
+    So each register now states its purpose and offers several examples. The
+    target is the intent; the examples triangulate it rather than define it.
+    """
+
     name: str
-    register: str
-    example: str
+    purpose: str
+    examples: tuple[str, ...]
     names_uncertainty: bool
 
 
 _CLOSINGS: tuple[Closing, ...] = (
     Closing("direct_offer",
-            "Ask about the specific thing you observed, assuming nothing. Do "
-            "NOT say you don't know whether it is relevant -- the question "
-            "already carries that.",
-            "Is outside engineering support something you'd consider while "
-            "those roles are open?",
+            "Ask about the specific thing you observed, assuming nothing. The "
+            "question does the hedging, so do not add a sentence saying you "
+            "don't know whether it is relevant.",
+            ("Is outside engineering support something you'd consider while "
+             "those roles are open?",
+             "Would extra build capacity be useful while that's running?",
+             "Is that something you'd ever bring in help for?"),
             False),
     Closing("usefulness",
-            "Ask plainly whether it would be useful. No hedging sentence "
-            "before it.",
-            "Would this be useful on your side?",
+            "Ask plainly whether it would be useful. Nothing before it.",
+            ("Would this be useful on your side?",
+             "Any use to you?",
+             "Is that useful, or not really?"),
             False),
     Closing("overlap",
-            "Ask whether it touches anything they are actually working on.",
-            "Does that overlap with anything you're working on?",
+            "Ask whether it touches anything they are actually working on. "
+            "Name the company or the work where it reads naturally.",
+            ("Does that overlap with anything you're working on?",
+             "Does any of that land near what you're doing at <company>?",
+             "Anything there close to what's on your plate?"),
             False),
     Closing("worth_it",
-            "Offer the conversation and the refusal in the same breath.",
-            "Worth a conversation, or not really?",
+            "Offer the conversation and the refusal in the same breath, so "
+            "saying no costs them nothing.",
+            ("Worth a conversation, or not really?",
+             "Worth twenty minutes, or is this off the mark?",
+             "Happy to talk, equally happy to be told it's not relevant."),
             False),
     Closing("easy_out",
-            "Give them an explicit way to ignore it. Warm, not apologetic.",
-            "If none of that is on your plate, no worries at all.",
+            "Give them an explicit way to ignore it. Warm, not apologetic, "
+            "and not self-deprecating.",
+            ("If none of that is on your plate, no worries at all.",
+             "If this isn't your area, ignore me entirely.",
+             "If the timing's wrong, no need to reply."),
             True),
     Closing("compare_notes",
-            "Make the offer conditional on it landing, and keep it light.",
-            "If it is, happy to compare notes.",
+            "Invite a low-pressure exchange without implying a sales call. "
+            "Peer to peer, not vendor to buyer.",
+            ("Curious how you're approaching that.",
+             "Happy to compare notes if useful.",
+             "Might be worth comparing how you're handling it.",
+             "Would be interesting to hear how you've set it up."),
             True),
     Closing("curious",
             "Name your own uncertainty once, briefly, then stop. One short "
-            "sentence -- not a paragraph of throat-clearing.",
-            "Curious whether this is relevant for you.",
+            "sentence, not a paragraph of throat-clearing.",
+            ("Curious whether this is relevant for you.",
+             "Not sure if that's your world at all.",
+             "May be well off the mark."),
             True),
 )
 

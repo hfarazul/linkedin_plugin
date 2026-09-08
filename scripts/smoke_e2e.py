@@ -383,7 +383,12 @@ def main() -> int:
                 closing = evidence_mod.choose_closing(facts.provider_id
                                                       or linkedin_url)
                 st.note("email_shape", shape.name)
+                angle = evidence_mod.choose_positioning(
+                    facts, bundle, facts.provider_id or linkedin_url)
+                domain = evidence_mod.matching_proof_domain(facts, bundle)
                 st.note("closing_register", closing.name)
+                st.note("positioning_angle", angle.name)
+                st.note("proof_domain", domain or "(none)")
                 st.note("names_uncertainty", closing.names_uncertainty)
                 st.note("shapes_available",
                         [x.name for x in evidence_mod.available_shapes(bundle)])
@@ -413,7 +418,8 @@ def main() -> int:
                         args.kind, prospect_id,
                         recent_posts=[{"text": p.text, "posted_at": p.posted_at}
                                       for p in posts],
-                        evidence=bundle.as_dict(shape, closing),
+                        evidence=bundle.as_dict(shape, closing,
+                                                angle, domain),
                         attempts_out=tries)
                     drafted_subject, body = drafter_mod.parse_email(raw)
                     _note_attempts(st, tries)

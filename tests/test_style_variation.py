@@ -335,8 +335,11 @@ def test_a_silent_closing_forbids_the_uncertainty_sentence() -> None:
                          evidence=LICENSED.as_dict(closing=silent))
     prompt = d.render_prompt(inp)
     assert "Do NOT write a sentence saying you don't know" in prompt
-    assert "do NOT reuse this wording" in prompt, \
-        "the example is a register, not a string to paste"
+    assert "Do not copy any of them" in prompt, \
+        "the examples triangulate an intent, they are not strings to paste"
+    assert prompt.count("  - ") >= 3, \
+        "one short example gets memorised — compare_notes reproduced its " \
+        "single example 4 times out of 4 across 25 drafts"
 
 
 # ======================= shape fulfilment ====================================
@@ -402,3 +405,110 @@ def test_unfulfilled_shape_drives_a_retry_then_yields(monkeypatch) -> None:
     assert out == vague, "a structural gap must not destroy the draft"
     assert tries[0].category == "shape_unfulfilled"
     assert "shape asked for" in seen[1]
+
+
+# ========================= positioning: relevance first ======================
+# Across 25 drafts, 23 called us "a small AI-engineering studio" — 92% — while
+# only 12 shared an introduction sentence. Twelve wordings, one claim. The
+# brief's actual work went unused: "six to ten weeks" appeared once in 25.
+
+from linkedin_agent.evidence import (  # noqa: E402
+    Positioning, choose_positioning, matching_proof_domain, _POSITIONING,
+)
+
+
+def _person(headline, title, posts=()):
+    facts = ProfileFacts(full_name="X", headline=headline,
+                         positions=[_pos("Acme", title, "2024-01-01",
+                                         current=True)])
+    return facts, build_evidence(facts, [_post(t) for t in posts])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("headline,title,posts,expected", [
+    ("Reservations Manager", "Reservations Manager", (), "plain"),
+    ("Director of Engineering", "Director of Engineering", (),
+     "senior_plus_tooling"),
+])
+def test_positioning_fits_the_evidence(headline, title, posts, expected) -> None:
+    facts, bundle = _person(headline, title, posts)
+    assert choose_positioning(facts, bundle, "k").name == expected
+
+
+@pytest.mark.unit
+def test_an_angle_is_never_offered_when_it_does_not_fit() -> None:
+    """The predicted failure mode of a naive rotation: every email naming a
+    different Cortivo fact regardless of whether it belongs. That is its own
+    tell, and a worse one, because it is also irrelevant."""
+    facts, bundle = _person("Reservations Manager", "Reservations Manager")
+    for key in (f"prospect-{i}" for i in range(30)):
+        assert choose_positioning(facts, bundle, key).name == "plain", \
+            "nothing is known about this person; no angle can fit"
+
+
+@pytest.mark.unit
+def test_a_hiring_signal_unlocks_the_capacity_angle() -> None:
+    facts, bundle = _person("CEO", "CEO", ("We're hiring engineers",))
+    eligible = {choose_positioning(facts, bundle, f"k{i}").name
+                for i in range(40)}
+    assert "extra_capacity" in eligible
+    assert "plain" not in eligible, "a fitting angle should beat the fallback"
+
+
+@pytest.mark.unit
+def test_positioning_spreads_when_several_angles_fit() -> None:
+    facts, bundle = _person("Founder & CTO", "Founder",
+                            ("We're hiring engineers", "We just launched"))
+    chosen = {choose_positioning(facts, bundle, f"p{i}").name for i in range(40)}
+    assert len(chosen) >= 3, f"collapsed to {chosen}"
+
+
+@pytest.mark.unit
+def test_the_proof_domain_matches_their_world_not_ours() -> None:
+    facts, bundle = _person("Group CFO at a private debt fund", "Group CFO")
+    assert "fintech" in (matching_proof_domain(facts, bundle) or "")
+    facts, bundle = _person("Reservations Manager", "Reservations Manager")
+    assert matching_proof_domain(facts, bundle) is None
+
+
+@pytest.mark.unit
+def test_positioning_cannot_license_a_claim() -> None:
+    """It selects which true thing about US to say. It must not touch what may
+    be said about THEM."""
+    facts, bundle = _person("Director of Engineering", "Director of Engineering")
+    before = bundle.pain_claim_licensed
+    choose_positioning(facts, bundle, "k")
+    assert bundle.pain_claim_licensed is before is False
+
+
+@pytest.mark.unit
+def test_the_angle_reaches_the_prompt_with_its_reason() -> None:
+    facts, bundle = _person("CEO", "CEO", ("We're hiring engineers",))
+    angle = choose_positioning(facts, bundle, "k")
+    inp = d.DrafterInput(kind="email1", campaign={}, prospect={},
+                         evidence=bundle.as_dict(positioning=angle))
+    prompt = d.render_prompt(inp)
+    assert angle.name in prompt
+    assert angle.angle[:30] in prompt
+    assert "Chosen because" in prompt, "the model should know why this angle"
+
+
+@pytest.mark.unit
+def test_plain_is_the_documented_default_not_an_error() -> None:
+    plain = next(a for a in _POSITIONING if a.name == "plain")
+    assert "honest default" in plain.when
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("headline", [
+    "Director of Engineering",
+    "VP Engineering",
+    "Head of Software",
+    "Engineering Manager",
+])
+def test_engineering_titles_match_on_the_stem(headline) -> None:
+    """\bengineer\b does not match "Engineering", and "Director of
+    Engineering" is one of the commonest titles there is — the first version
+    of this pattern silently sent every one of them to the plain fallback."""
+    facts, bundle = _person(headline, headline)
+    assert choose_positioning(facts, bundle, "k").name == "senior_plus_tooling"

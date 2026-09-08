@@ -392,11 +392,29 @@ def render_prompt(inp: DrafterInput, retry_hint: str | None = None) -> str:
                 "Do NOT write a sentence saying you don't know whether this "
                 "is relevant. The question carries it."
             )
+            samples = "\n".join(f"  - {e}" for e in close.get("examples", []))
             closing = (
-                f"HOW TO CLOSE — {close['name']}: {close['register']} "
-                f"{uncertainty}\n"
-                f"Register example (do NOT reuse this wording, write your "
-                f"own in this register): \"{close['example']}\"\n\n{closing}"
+                f"HOW TO CLOSE — {close['name']}\n"
+                f"Purpose: {close['purpose']} {uncertainty}\n"
+                f"Sentences that hit this intent:\n{samples}\n"
+                f"Do not copy any of them. They triangulate the target; write "
+                f"your own sentence that lands in the same place.\n\n{closing}"
+            )
+        angle = inp.evidence.get("positioning")
+        if angle:
+            domain = angle.get("proof_domain")
+            closing = (
+                f"HOW TO INTRODUCE CORTIVO — {angle['name']}\n"
+                f"Angle: {angle['angle']}\n"
+                f"Chosen because: {angle['fits_because']}.\n"
+                + (f"Their world resembles ours in: {domain}. Name the "
+                   f"matching proof point from the brief.\n" if domain and
+                   angle["name"] == "proof_point" else "")
+                + "Across 25 drafts, 23 called us \"a small AI-engineering "
+                  "studio\" while the brief's actual work went unmentioned. "
+                  "Twelve different sentences, one identical claim. Use THIS "
+                  "angle instead, in your own words, and do not fall back on "
+                  "the generic self-description.\n\n" + closing
             )
         shape = inp.evidence.get("shape")
         if shape:

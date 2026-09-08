@@ -56,6 +56,7 @@ def _emails(directory: Path) -> list[dict]:
             "closing": fields.get("closing_register", "?"),
             "tier": fields.get("evidence_tier", "?"),
             "dashes": fields.get("connector_dashes", "?"),
+            "angle": fields.get("positioning_angle", "?"),
         })
     return out
 
@@ -146,6 +147,7 @@ def main() -> int:
     say(f"\n{'=' * 66}\nFINGERPRINT REPORT — {n} drafts from {directory.name}\n{'=' * 66}")
 
     for label, key in (("shape", "shape"), ("closing register", "closing"),
+                       ("positioning angle", "angle"),
                        ("evidence tier", "tier")):
         say(f"\n{label.upper()}")
         for value, count in Counter(e[key] for e in emails).most_common():
