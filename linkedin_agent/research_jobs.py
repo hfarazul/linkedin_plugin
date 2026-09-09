@@ -76,7 +76,7 @@ class ResultNotReady(RuntimeError):
     """
 
 
-def _apply_profile(job, rows: list, provider=None) -> str:
+def _apply_profile(job, rows: list, provider) -> str:
     """Persist a finished profile scrape onto the prospect.
 
     Reuses enrichment's field mapping so a job-applied profile and an inline

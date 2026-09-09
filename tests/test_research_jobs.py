@@ -375,7 +375,7 @@ def test_job_result_for_a_different_person_is_not_applied(db_env):
 
     # PROFILE_ROW is somebody else entirely — the previous run's target.
     with pytest.raises(research_jobs.ResultNotReady, match="not applying it"):
-        research_jobs._apply_profile(job, [PROFILE_ROW])
+        research_jobs._apply_profile(job, [PROFILE_ROW], None)
 
     after = db.get_prospect(pid)
     assert after["headline"] is None, "another person's headline was written"
@@ -396,7 +396,7 @@ def test_job_result_for_the_requested_person_is_applied(db_env):
     job_id = db.create_job(Capability.PROFILE.value, "phantombuster",
                            prospect_id=pid, target="ACoJOBTEST0000000000")
 
-    summary = research_jobs._apply_profile(db.get_job(job_id), [PROFILE_ROW])
+    summary = research_jobs._apply_profile(db.get_job(job_id), [PROFILE_ROW], None)
 
     assert "applied" in summary
     after = db.get_prospect(pid)

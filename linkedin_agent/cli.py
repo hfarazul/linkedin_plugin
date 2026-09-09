@@ -303,6 +303,11 @@ def connect(prospect_id: int, note: str | None) -> None:
         result = adapter.send_connection(p["linkedin_url"], note=note)
         db.log_action(prospect_id, "connect", json.dumps({"note": note}), result, False)
         db.set_status(prospect_id, "connection_sent")
+        if note:
+            # Same reason as the daemon's connect path: an unrecorded connect
+            # note leaves the prospect with no outbound message, which breaks
+            # reply detection and hides the first turn from the drafter.
+            db.record_message(prospect_id, "outbound", note)
         safety.human_delay(cfg)
         console.print(f"[green]✓[/green] connection request sent to {p['full_name'] or p['linkedin_url']}")
     finally:

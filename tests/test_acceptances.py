@@ -288,3 +288,51 @@ def test_a_pending_check_is_stamped_so_it_moves_to_the_tail(db_env):
     row = db.get_prospect(pid)
     assert row["status"] == "connection_sent", "still pending, correctly"
     assert row["acceptance_checked_at"] is not None, "a pending check must stamp"
+
+
+@pytest.mark.integration
+def test_a_check_that_raises_still_spends_its_slot(db_env):
+    """A failing check must not squat a budget slot forever.
+
+    The stamp originally sat after the provider call, inside the try, so an
+    exception skipped it — and NULL sorts first in the rotation. A prospect
+    whose check reliably throws (deleted profile, an id the Phantom cannot
+    resolve) was then re-checked on every tick indefinitely, burning a
+    container launch an hour on something that can never resolve. Four of them
+    and the rotation is dead.
+    """
+    from linkedin_agent import db, enrichment
+
+    ids = {}
+    for name in ("BAD", "GOOD0", "GOOD1", "GOOD2"):
+        pid = db.upsert_prospect(
+            linkedin_url=f"https://www.linkedin.com/in/slot-{name.lower()}",
+            full_name=f"Slot {name}",
+            provider_id=f"ACo{name}",
+        )
+        ids[name] = pid
+        with db.connect() as conn:
+            conn.execute("UPDATE prospects SET status='connection_sent' WHERE id=?",
+                         (pid,))
+
+    class FlakyProvider(FakeProvider):
+        def check_acceptance(self, identifier):
+            if identifier == "ACoBAD":
+                raise RuntimeError("profile no longer exists")
+            return False
+
+    batches = []
+    for _ in range(2):
+        before = {n: db.get_prospect(i)["acceptance_checked_at"] for n, i in ids.items()}
+        enrichment.check_acceptances(_cfg(), limit=2,
+                                     router=fake_router(FlakyProvider()))
+        after = {n: db.get_prospect(i)["acceptance_checked_at"] for n, i in ids.items()}
+        batches.append({n for n in ids if before[n] != after[n]})
+
+    assert db.get_prospect(ids["BAD"])["acceptance_checked_at"] is not None, \
+        "a raising check left the prospect unstamped"
+    # Four prospects, two per tick: two ticks give everyone exactly one turn,
+    # and the failing one takes a slot once rather than every time.
+    assert sum("BAD" in b for b in batches) == 1
+    assert not (batches[0] & batches[1])
+    assert batches[0] | batches[1] == set(ids)

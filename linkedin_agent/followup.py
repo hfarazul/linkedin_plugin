@@ -90,7 +90,15 @@ def is_ghost_candidate(prospect, now: datetime) -> bool:
     class of them sitting in `dm_sent` forever — never chased, never ghosted,
     and counted as live in every pipeline view, while CLAUDE.md documents
     ghosting as automatic. For a parked prospect nothing else moves
-    `last_action_at`, so it holds the dispatch time.
+    `last_action_at` (only set_status and set_disposition write it), so it
+    holds the dispatch time.
+
+    Be aware of what this disposition then asserts. `ghosted` reads as
+    "messaged three times, never replied", and where the third send was
+    unconfirmed it may never have landed — so the label can outrun the
+    evidence. Permanent limbo is the worse outcome and the `send_unconfirmed`
+    action row preserves what actually happened, but a ghosted prospect is not
+    always proof of silence.
     """
     if prospect["disposition"]:
         return False

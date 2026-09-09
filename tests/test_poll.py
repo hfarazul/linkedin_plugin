@@ -362,3 +362,67 @@ def test_backlog_older_than_our_outreach_still_leaves_the_pipeline_alone(db_env,
 
     assert db.get_prospect(pid)["status"] == "dm_sent"
     assert db.get_draft(live_draft)["status"] == "pending"
+
+
+@pytest.mark.integration
+def test_a_reply_to_a_connect_note_halts_the_sequence(db_env, monkeypatch):
+    """The cohort the ordering rule originally missed.
+
+    A connect note was never written to `messages` — only set_status and
+    log_action ran — so every prospect at connection_sent or connected had zero
+    outbound rows and fell through to the age fallback. A reply to a connect
+    note is the commonest inbound there is, so the cohort most likely to answer
+    was the one least protected: dm1 would be drafted at someone who had
+    already replied.
+
+    Recording the note fixes it at the source, and is independently right — it
+    is a message we sent, and the thread the drafter reads for a reply was
+    missing its first turn.
+    """
+    from datetime import datetime, timedelta, timezone
+    from linkedin_agent import db, poll as poll_mod
+    from linkedin_agent.adapters import get_adapter
+    from linkedin_agent.bot_daemon import send_draft_via_adapter
+    from linkedin_agent.providers.capabilities import InboundMessage
+
+    pid = db.upsert_prospect(
+        linkedin_url="https://www.linkedin.com/in/connect-reply",
+        full_name="Connect Reply",
+        provider_id="ACoCONNECTREPLY",
+    )
+    with db.connect() as conn:
+        conn.execute("UPDATE prospects SET status='reacted' WHERE id=?", (pid,))
+
+    # Send the connect note through the real funnel.
+    did = db.enqueue_draft(pid, "connect_note", "a note referencing their work")
+    cfg = _cfg()
+    adapter = get_adapter(cfg)
+    try:
+        send_draft_via_adapter(cfg, adapter, db.get_draft(did))
+    finally:
+        adapter.close()
+    assert db.get_prospect(pid)["status"] == "connection_sent"
+
+    # The note is now part of the thread the drafter will read.
+    with db.connect() as conn:
+        outbound = conn.execute(
+            "SELECT body FROM messages WHERE prospect_id=? AND direction='outbound'",
+            (pid,)).fetchall()
+    assert [r["body"] for r in outbound] == ["a note referencing their work"]
+
+    # They answer it, late enough that the age gate alone would call it backlog.
+    now = datetime.now(timezone.utc)
+    provider = FakeProvider(inbox=[InboundMessage(
+        external_id="msg-connect-reply", prospect_provider_id="ACoCONNECTREPLY",
+        body="Sure — what do you have in mind?",
+        sent_at=(now + timedelta(minutes=1)).isoformat(),
+        thread_id="chat-cr", is_from_me=False, source="phantombuster")])
+
+    fake_tg = FakeTelegramClient(_cfg())
+    monkeypatch.setattr(poll_mod, "TelegramClient", lambda c: fake_tg)
+
+    poll_mod.poll_once(_cfg(), router=fake_router(provider), notify=True,
+                       drafter=_stub_drafter_ok)
+
+    assert db.get_prospect(pid)["status"] == "replied", \
+        "a reply to our connect note left the prospect live for dm1"

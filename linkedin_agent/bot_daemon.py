@@ -299,6 +299,19 @@ def send_draft_via_adapter(cfg: Config, adapter, draft, *, source: str = "cli") 
         # one is the failure to avoid, and the acceptance check resolves the
         # truth of this one on its own schedule.
         db.set_status(pid, "connection_sent")
+        # A connect note is a message we sent them, and recording it as one
+        # fixes two things that both come from its absence.
+        #
+        # Reply detection: poll decides whether an inbound halts the sequence
+        # by asking whether it post-dates our last outbound. With no outbound
+        # row, every prospect at connection_sent or connected fell through to
+        # the age fallback — and a reply to a connect note is the commonest
+        # inbound there is, so the cohort most likely to answer was the one
+        # least protected.
+        #
+        # Drafting: build_input reads `messages` for dm2/dm3/reply context,
+        # so the thread it showed the drafter was missing its first turn.
+        db.record_message(pid, "outbound", body)
         db.log_action(pid, "connect", json.dumps({"note": body[:200], "via": source}),
                       api_result, cfg.dry_run)
         if unconfirmed:

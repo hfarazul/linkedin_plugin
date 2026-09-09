@@ -189,18 +189,24 @@ def check_acceptances(
         router = build_router(cfg)
     try:
         for p in candidates:
+            # Stamped BEFORE the call, not after it. The column means "we spent
+            # a slot on this one", which is true the moment we commit to
+            # spending it — and only that reading keeps the rotation honest.
+            #
+            # Stamping after `perform` left it NULL whenever the check raised,
+            # and NULL sorts first, so a prospect whose check reliably throws
+            # (deleted profile, an id the Phantom cannot resolve) was re-checked
+            # every tick forever. Four of those and the rotation is dead again,
+            # burning four container launches an hour on prospects that can
+            # never resolve.
+            with db.connect() as conn:
+                conn.execute(
+                    "UPDATE prospects SET acceptance_checked_at = ? WHERE id = ?",
+                    (db.now(), int(p["id"])))
             try:
                 accepted = router.perform(
                     Capability.ACCEPTANCE_CHECK, "check_acceptance",
                     p["provider_id"])
-                # Stamped before the outcome is examined, so a check that came
-                # back "still pending" still moves this prospect to the tail of
-                # the rotation. Stamping only on success would recreate the
-                # starvation this column exists to fix.
-                with db.connect() as conn:
-                    conn.execute(
-                        "UPDATE prospects SET acceptance_checked_at = ? WHERE id = ?",
-                        (db.now(), int(p["id"])))
                 if accepted is None:
                     result.errors += 1
                     result.error_messages.append(f"p={p['id']}: fetch returned None")
