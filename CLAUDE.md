@@ -1,8 +1,62 @@
 # LinkedIn Outreach Agent — Software Agency Lead-Gen
 
-This project runs LinkedIn outreach for a software agency. **You (Claude Code) are the agent.** The Python package `linkedin_agent` is the toolkit you drive.
+This project runs LinkedIn outreach for Cortivo, a software agency. **You (Claude Code) are the agent.** The Python package `linkedin_agent` is the toolkit you drive.
 
 Day-to-day, most operations are automated by cron. You're invoked when there's *judgment* to apply: writing a campaign brief, drafting a custom message, replying to an interested prospect.
+
+---
+
+## Read this first — invariants that are not obvious from the code
+
+These were each established by a defect that reached, or nearly reached, a real person. Every one of them is enforced somewhere in code, but the reasoning lives here. **Do not "simplify" past any of them without reading the linked rationale.**
+
+### 1. `messages` is not proof that a DM was sent
+
+A row in `messages` means *we composed something and dispatched it*. It does not mean LinkedIn delivered it, and it does not mean it was a DM — **connection notes are recorded as outbound messages too**.
+
+**`dm_count` is the single source of truth for DM1 gating.** `record_message` never touches it. If you find yourself writing `SELECT ... FROM messages` to decide whether to send a first DM, you are reintroducing a bug.
+
+### 2. Connection notes are outbound messages
+
+`send_draft_via_adapter` and `linkedin connect` both write the note to `messages`. Two things depend on it:
+
+- **Reply detection.** `poll` decides whether an inbound halts the sequence by asking whether it post-dates our last outbound. Without the note recorded, every prospect at `connection_sent`/`connected` had no outbound row and fell through to a coarse age check — and a reply to a connect note is the commonest inbound there is.
+- **Drafter context.** `build_input` reads `messages` for dm2/dm3/reply threads. Without the note, the thread shown to the drafter was missing its first turn.
+
+Note dm1 does *not* currently pull thread context (`build_input` only does so for dm2/dm3/reply), so the first DM cannot see the connect note and may repeat it. Known, deliberate, one-word fix if you want it.
+
+### 3. An unconfirmed send advances the pipeline but not the clock
+
+PhantomBuster reports that a *container finished*, not that a recipient received anything. That is neither success nor failure, and it gets its own handling:
+
+- `dm_count` **is** bumped — otherwise the next cron tick drafts DM1 again, and repeat sends are the worse failure.
+- `last_dm_at` **is cleared** — a follow-up cadence timed from a send nobody observed produces "circling back on what I sent last week" to someone who was sent nothing.
+
+`db.record_dm(prospect_id, confirmed=...)` — **`confirmed` is required, deliberately.** A default silently handed the old behaviour to unmigrated call sites once already. Detect the state with `providers.router_adapter.is_unconfirmed(api_result)`; log it with `bot_daemon.log_unconfirmed`. `linkedin status` surfaces these so parked prospects aren't forgotten.
+
+Consequence worth knowing: `ghosted` can outrun its evidence. If an unconfirmed DM3 never landed, "messaged three times, never replied" is a claim about behaviour we didn't observe. The `send_unconfirmed` action row preserves the truth.
+
+### 4. Unverified writes stay disarmed by default
+
+`PHANTOMBUSTER_ENABLE_UNVERIFIED` gates unverified **writes** (`react`, `connect`, `send_dm`). Setting an agent id *configures* a Phantom; it does not *arm* one.
+
+Unverified **reads** need no opt-in — with one provider left, gating a read off routes around nothing, and a malformed read raises rather than reaching anyone.
+
+**`DRY_RUN=0` is not authorization.** It is currently `0` on the deployment host. The opt-in gate is the real backstop. `linkedin providers` shows `DISARMED` (configured, deliberately off) distinctly from `NONE` (nothing configured) — different problems, opposite fixes.
+
+### 5. `lastMessageDate` is millisecond-precision ISO
+
+Real Inbox Scraper output looks like `"2025-05-31T09:57:02.966Z"`, not date-only. The inbound-vs-outbound ordering comparison in `poll` depends on this: a same-day reply must not sort behind our outbound.
+
+### 6. The evidence gates must be wired before any email sending ships
+
+**This is a hard prerequisite, not a nice-to-have.**
+
+`linkedin_agent/evidence.py` types everything known about a prospect by *what it licenses us to say*, and `drafter.draft()` enforces eight gates on top of it. But **no production path passes `evidence=`** — `daily.py`, `followup.py` and `poll.py` all call the drafter without it, and the only caller of `build_evidence` is `scripts/smoke_e2e.py`.
+
+With `evidence=None`, `enforce_pain_gate` is False for DM kinds and `thin_evidence` is False, so **the pain-claim and inferred-relevance gates are inactive on the live DM path.** Nothing reaches anyone today because email sending isn't built and LinkedIn writes are disarmed — but those gates are what make a first-touch draft defensible, and they must be in the execution path before the email path goes live.
+
+---
 
 ## The system in 30 seconds
 
@@ -12,29 +66,63 @@ campaign brief (markdown)
         ▼
 hourly cron (`linkedin daily`)
         │  - syncs campaigns from markdown files
-        │  - polls Unipile for inbound replies
+        │  - polls PhantomBuster Inbox Scraper for inbound replies
+        │  - checks pending invites for acceptance (bounded per cycle)
         │  - reacts to targeted prospects' recent posts
         │  - drafts connect notes / DM1 / DM2 / DM3 via the message-drafter subagent
         ▼
 Telegram bot (drafts post with Approve/Edit/Reject buttons)
         │
         ▼  user taps on phone
-Unipile API → LinkedIn
+PhantomBuster → LinkedIn
 ```
 
 Drafts approved outside business hours stay queued (`status='approved'`) until the next 9-5 Mon-Fri window.
 
+**Unipile has been removed.** `LINKEDIN_PRIMARY_PROVIDER=phantombuster` is the only routable provider; `build_router` raises on `unipile`. The module and its tests survive as a date-parsing reference only.
+
+## Architecture — five layers
+
+```
+CLI (click)              cli.py — ~30 commands
+        │
+Orchestration            daily.py (8-step cron), poll.py, followup.py, bot_daemon.py
+        │
+Judgment                 evidence.py, icp_scoring.py, drafter.py (the eight gates)
+        │
+Capability seam          providers/{base,capabilities,router}.py
+        │                Capability enum → router → provider. Nothing above this
+        │                seam sees vendor JSON.
+Vendor                   providers/phantombuster.py + pb_jobs.py
+```
+
+Two seams carry the design:
+
+- **`providers/router.py`** picks a provider per *capability*, never per vendor, and its fallback policy is keyed on *error class*: `UnsupportedCapability` and `MalformedResponse` may fall through; `ProviderAuthError` and `ProviderRateLimited` never do (both providers drive one LinkedIn account, so falling back deepens a block); writes fall back on nothing but an explicit "cannot".
+- **`providers/router_adapter.py`** presents the router as the legacy `LinkedInAdapter`, so existing call sites in `cli.py` / `daily.py` / `bot_daemon.py` were never rewritten.
+
+## Capability state
+
+Check the live view rather than trusting this table — `linkedin providers` reads the actual config.
+
+| Capability | State | Notes |
+|---|---|---|
+| profile / experience | **verified** | Profile Scraper, run live many times |
+| inbox_read | **verified** | Inbox Scraper |
+| acceptance_check | **verified** | From `connectionDegree` |
+| recent_posts | unverified | Runs live and works; flag is conservative |
+| search_people | unverified | Configured, output never inspected |
+| search_posts | **no provider** | No PhantomBuster equivalent exists |
+| react / connect / send_dm | **disarmed** | See invariant 4 |
+| email sending | **not built** | Renders and stops at `NOT SENT` |
+
+> **One agent, one job.** Retargeting a Phantom writes to its **saved** configuration — a launch-time argument is accepted and then ignored. Two runs pointing the same agent at different profiles clobber each other. This is also why the result file is agent-scoped and why `_apply_profile` matches the returned row against the job's target before writing it.
+
 ## Campaign-first workflow
 
-Every prospect belongs to a campaign. Campaigns are markdown files under `campaigns/`:
+Every prospect belongs to a campaign. Campaigns are markdown files under `campaigns/`, and they are the source of truth — DB rows are derived.
 
-```
-campaigns/
-├── ai-dev-pod.md       # AI engineering pod offering, Series A-C SaaS founders
-├── rails-rescue.md     # Rails performance/refactor for established teams
-```
-
-Each file has YAML frontmatter (slug, name, status, target_icp) plus a markdown body with the pitch, pain points, proof points, and desired tone. The drafter reads the file when generating messages, so editing the brief immediately changes the drafted output.
+`campaigns/_cortivo.md` is the **only authority on what we may claim about ourselves**. The `ungrounded_cortivo_claim` gate checks names, figures and practice claims against it. Editing it changes what the drafter is allowed to say on the next draft.
 
 To create one: `linkedin campaign create <slug>` scaffolds the file; edit it; `linkedin campaign sync` (or any `daily` run) refreshes the DB.
 
@@ -47,7 +135,7 @@ targeted → reacted → connection_sent → connected → dm_sent → replied
 Plus a `disposition` column (set after conversation begins):
 `interested · not_fit · ghosted · won · lost · deferred`
 
-`ghosted` auto-applies 14 days after DM3 with no reply. The others are manual flags the user sets after talking to the prospect.
+`ghosted` auto-applies 14 days after DM3 with no reply — falling back to `last_action_at` when `last_dm_at` is NULL, so an unconfirmed final send doesn't park a prospect forever. The others are manual flags.
 
 ## Daily ops — what the cron does
 
@@ -55,6 +143,7 @@ Plus a `disposition` column (set after conversation begins):
 |---|---|---|
 | `campaigns sync` | Refresh DB from markdown files | — |
 | `poll` | Fetch inbound replies, halt sequences, **auto-draft a reply** | **Yes (Telegram)** |
+| `check-accepts` | Detect accepted invites → `connected`. **Bounded per cycle** (`DAILY_MAX_ACCEPTANCE_CHECKS`, default 4) — each check is a profile re-scrape, and an unbounded sweep outran the hourly cron. Rotates on `acceptance_checked_at`. | — |
 | `react` | Like recent post of each `targeted` prospect → `reacted` | No (low stakes) |
 | `connect` | Draft connect note for each `reacted` prospect | **Yes (Telegram)** |
 | `dm1` | Draft first DM for each `connected` prospect with `dm_count=0` | **Yes (Telegram)** |
@@ -62,185 +151,140 @@ Plus a `disposition` column (set after conversation begins):
 | `send-approved` | Flush drafts approved outside the business-hours window | — |
 | `auto-ghost` | Mark stale `dm_count=3` prospects as `ghosted` | — |
 
-You as the agency owner only see Telegram approval cards on your phone. Tap to approve, swipe to reject, tap Edit + reply to rewrite.
+## Reply handling — two separate gates
+
+`poll` asks two different questions about an inbound, and they must not be collapsed:
+
+- **Should this halt the sequence?** Decided by *ordering* — is the inbound newer than our last outbound? A genuine reply halts however old it is. Age is only the fallback where we have never written to them.
+- **Should we auto-draft a reply to it?** Decided by *age* (`REPLY_DRAFT_MAX_AGE_DAYS`, default 30). A 40-day-old reply stops the sequence without being answered 40 days late.
+
+The Inbox Scraper is incremental, so its first run against a real account returns the entire backlog — threads up to 15 months old. A backlog inbound is recorded and notified (logged as `reply_stale`) but must never touch the pipeline.
 
 ## When Claude Code is needed (interactive)
 
-The cron handles everything *mechanical*. Claude Code is for the parts that benefit from judgment:
+1. **Creating a new campaign** — follow the protocol below. Don't just `campaign create` and let the user write a brief in the dark.
+2. **Recrafting a reply the auto-drafter got wrong.** Read the full thread (`messages` for that prospect) and the campaign brief, draft, send via `linkedin dm <pid> "..."`.
+3. **Tuning the drafter prompt.** Iterate on `.claude/agents/message-drafter.md`, then re-run `scripts/smoke_e2e.py` to see the new style.
+4. **One-off prospect work.** Use the message-drafter subagent directly.
 
-1. **Creating a new campaign** — follow the protocol in the next section. Don't just `campaign create` and let the user write a brief in the dark.
-2. **Recrafting a reply that the auto-drafter got wrong.** Replies are auto-drafted by `poll` and pushed to Telegram alongside the inbound message. Most are good enough to Approve or Edit on phone. But for nuanced replies — pricing pushback, scope negotiation, scheduling — the user will reject the phone draft and ask Claude Code for a better one. Read the full thread (`messages` table for that prospect) and the campaign brief, draft, send via `linkedin dm <pid> "..."`.
-3. **Tuning the drafter prompt.** If drafts feel off, iterate on `.claude/agents/message-drafter.md`. Edit and immediately rerun `linkedin daily` to see the new style.
-4. **One-off prospect work.** "Draft a custom DM2 for prospect 5 — they replied with a question about pricing." Use the message-drafter subagent directly.
+## Testing one profile, end to end
+
+**The command to reach for first.** Runs the real pipeline against a throwaway DB and narrates all twelve stages — which provider served each, how long it took, and *why* a record was accepted or rejected.
+
+```powershell
+.venv\Scripts\python.exe scripts\smoke_e2e.py --profile "https://www.linkedin.com/in/<slug>/"
+```
+
+Add `--real-drafter` to invoke Claude and write an actual email (up to 3 calls if gates reject attempts). Other flags: `--campaign <slug>`, `--kind email1|dm1|connect_note`, `--skip-geo`, `--skip-role` (both log the bypass so it never looks like a pass), `--real-telegram`.
+
+Stages that tell you the most: **07** (ICP scoring — should we contact them at all), **10** (`pain_claim_licensed` — what may we claim), **11** (attempts and which gate fired), **12** (validation, then the rendered email, then `NOT SENT`).
+
+`scripts/fingerprint_report.py <dir>` measures what a *batch* of drafts has in common. Every fingerprint this project has removed was invisible in a single draft and obvious in five.
 
 ## Campaign creation protocol — follow this every time
 
-When the user says "let's create a new campaign" / "I want to target X" / similar:
+### Phase 1 — Clarifying questions (ask all 8)
 
-### Phase 1 — Clarifying questions (don't skip, ask all 8)
-
-Don't accept a one-line ICP. Push for specificity on each:
-
-1. **Who, specifically?** Role + company stage + size. ("Founders" is too broad; "non-tech founders of pre-seed B2B SaaS, under $1M ARR" is workable.)
-2. **Where?** Country/region/cities. (Default to US/Europe unless told otherwise — see Unipile proxy notes in the doc.)
+1. **Who, specifically?** Role + company stage + size.
+2. **Where?** Country/region/cities.
 3. **What pain?** 2-3 specific points the prospect would recognize.
-4. **Why now?** What trigger/timing makes them open to outreach this quarter?
-5. **What Cortivo angle?** Mutual connections? Shared school (IIT)? Specific vertical we've shipped in (fintech via Mastercard/Bespoke, retail via Coca-Cola, etc.)?
-6. **Anti-claims?** What this campaign explicitly avoids saying. (E.g., "don't pitch as cheap" / "don't reference Upwork to VC-track founders.")
+4. **Why now?** What trigger makes them open to outreach this quarter?
+5. **What Cortivo angle?** Mutual connections, shared school (IIT), a vertical we've shipped in.
+6. **Anti-claims?** What this campaign explicitly avoids saying.
 7. **Tone?** Financial/operational? Peer-to-peer? Consultative? Technical?
-8. **Search queries?** What 2-3 LinkedIn classic-search keyword strings would surface this ICP? Remember classic search only does keyword matching — phrases like "we just raised" return investors talking about deals.
+8. **Search queries?** 2-3 LinkedIn classic-search keyword strings. Classic search is keyword-only — "we just raised" returns investors talking about deals.
+
+Push back on vague answers: "founders" → stage + vertical; "AI companies" → buyer profile; "tech founders" → technical vs non-technical (huge ICP-fit signal).
 
 ### Phase 2 — Search validation (mandatory gate)
 
-For each candidate query (≥1, ideally 2-3):
-
 ```
-linkedin validate-query "<query>" --limit 10 --campaign <slug-once-created>
+linkedin validate-query "<query>" --limit 10 --campaign <slug>
 ```
 
-This grades each result on geography + role keywords + noise exclusion. The CLI exits 0 if keepers ≥ 6/10, exits 1 with the table of issues otherwise.
-
-- **All queries pass**: proceed to Phase 3.
-- **All queries fail**: iterate on the search terms with the user. Common fixes — add a specific city ("non-technical founder Boston"), add a stage qualifier ("seed-stage founder"), drop a phrase that matches investor vocabulary.
-- **Mixed**: use only the queries that pass.
+Grades each result on geography + role + noise exclusion. Exits 0 if keepers ≥ 6/10. All pass → Phase 3. All fail → iterate (add a city, add a stage qualifier, drop investor-vocabulary phrases). Mixed → use only the queries that pass.
 
 ### Phase 3 — Generate the brief
 
-Once at least one query passes validation, write `campaigns/<slug>.md` synthesizing the answers from Phase 1. Use the structure in `campaigns/_cortivo.md` as the canon. Per-campaign frontmatter overrides are optional:
-
-```yaml
----
-slug: ...
-name: ...
-status: active
-target_icp: <long descriptive sentence>
-# Optional ICP heuristic overrides for validate-query:
-icp_role_required: "founder|ceo|owner"
-icp_role_excluded: "investor|vc|venture|coach"
-icp_geo_required: "United States|, CA\\b|United Kingdom"
----
-```
-
-Then `linkedin campaign sync` and show the user the rendered brief.
+Write `campaigns/<slug>.md` using `campaigns/_cortivo.md` as canon. Optional frontmatter overrides: `icp_role_required`, `icp_role_excluded`, `icp_geo_required`. Then `campaign sync` and show the rendered brief.
 
 ### Phase 4 — First import is small
 
-Don't import 50 prospects at once. **Import 5-10 first**, eyeball them in `linkedin pipeline --status targeted`, and only scale up after a couple have moved through to `connected`. This catches campaign mismatches early.
-
-### What to push back on
-
-If the user gives vague answers, ask follow-ups. Specifically:
-- "Founders" → push for stage + vertical
-- "AI companies" → push for buyer profile (founder? CTO? Head of Product?)
-- "Tech founders" → push for non-technical vs technical (huge ICP-fit signal)
-
-A campaign with vague positioning produces drafts that read templated. The whole point of the protocol is to surface specificity that the drafter can latch onto.
+**Import 5-10 first**, eyeball with `pipeline --status targeted`, scale only after a couple reach `connected`.
 
 ## CLI reference
 
-All commands are `python -m linkedin_agent <subcommand>` (or `linkedin <subcommand>` if the venv is activated).
+All commands are `python -m linkedin_agent <subcommand>` (or `linkedin <subcommand>` with the venv active). On Windows: `.venv\Scripts\python.exe -m linkedin_agent <subcommand>`.
 
 ### Day-to-day
 | Command | Purpose |
 |---|---|
-| `status` | One-shot dashboard: caps, window status, pipeline by stage, replies, due follow-ups |
+| `init` | Create the SQLite DB and required directories |
+| `status` | Caps, window, pipeline by stage, replies, due follow-ups, **unconfirmed sends** |
 | `daily` | Run the full cron cycle once |
+| `providers` | Capability routing table — owner, evidence level, disarmed writes |
 | `caps` | Usage vs. daily caps |
 | `poll` | Fetch inbound replies only |
+| `check-accepts` | Detect accepted invites (the `daily` step, runnable alone) |
+| `followup` | Draft due DM2/DM3 only |
 | `pipeline [--status STATUS]` | List prospects |
+| `jobs [--collect]` | Async provider work in flight |
+| `healthcheck` | Did the cron actually fire? |
 
 ### Campaigns
-| Command | Purpose |
-|---|---|
-| `campaign create <slug>` | Scaffold a new campaign markdown file + DB row |
-| `campaign sync` | Re-read all `campaigns/*.md` into the DB |
-| `campaign list` | All campaigns |
-| `campaign show <slug>` | Print the full brief |
-| `campaign archive <slug>` | Mark archived (no new work) |
-| `campaign assign <prospect_id> <slug>` | Attach a prospect to a campaign |
+`campaign create|sync|list|show|archive|assign`
 
 ### Discovery + manual outreach
 | Command | Purpose |
 |---|---|
-| `search "<query>" --campaign <slug> --limit N` | Search LinkedIn, import N prospects into the campaign |
-| `posts <prospect_id>` | Recent posts |
-| `react <prospect_id>` | React manually |
-| `connect <prospect_id> --note "..."` | Send connection request manually |
-| `dm <prospect_id> "<body>"` | Send DM manually |
+| `validate-query "<q>" --limit N --campaign <slug>` | Grade a query before committing to it |
+| `search "<query>" --campaign <slug> --limit N` | Search and import |
+| `search-posts "<keywords>" --campaign <slug>` | Search post *content*, import authors. **Currently unroutable** — no PhantomBuster equivalent |
+| `enrich --prospect-id N` / `--all-stale` | Refresh a stored profile |
+| `posts <pid>` / `react <pid>` / `connect <pid> --note "..."` / `dm <pid> "<body>"` | Manual actions |
 
-### Telegram + bot daemon
-| Command | Purpose |
-|---|---|
-| `bot-run` | Start the Telegram daemon (long-running; runs alongside cron) |
-| `telegram-test` | Sanity check |
-| `telegram-push-draft <draft_id>` | Manually re-push a draft to Telegram |
-| `_debug-enqueue <pid> <kind> "<body>" [--no-push]` | Enqueue without invoking the drafter (testing) |
-
-### Send-window
-| Command | Purpose |
-|---|---|
-| `send-approved [--force]` | Flush any `approved` drafts that were queued outside the window |
+### Telegram + send window
+`bot-run`, `telegram-test`, `telegram-push-draft <id>`, `_debug-enqueue <pid> <kind> "<body>"`, `send-approved [--force]`
 
 ## Safety rules
 
-1. **Never bypass the CLI.** Adapter methods don't enforce rate limits. Always use `python -m linkedin_agent <subcommand>`.
-2. **Always check `caps` or `status` before bulk actions.** Hard caps (default 30 reactions / 20 connections / 10 DMs / 50 searches per 24h) will raise.
-3. **Don't push drafts to LinkedIn that haven't been approved in Telegram.** The approval flow is the human-in-the-loop quality check.
-4. **Stop if anything looks off.** Captcha screens, "unusual activity" warnings, or unexpected 4xx responses from Unipile → tell the user, don't retry.
+1. **Never bypass the CLI.** Adapter methods don't enforce rate limits.
+2. **Check `caps` or `status` before bulk actions.** Hard caps (30 reactions / 20 connections / 10 DMs / 50 searches per 24h) raise rather than silently trimming.
+3. **Don't push unapproved drafts.** The Telegram approval flow is the human-in-the-loop quality check.
+4. **Never retry a write on another provider.** A write whose outcome is unknown is how you double-invite someone.
+5. **Stop, don't retry.** Captcha screens, "unusual activity" warnings, unexpected 4xx → tell the user. Retrying through an anti-bot signal is how an account gets restricted.
 
 ## State
 
-- DB: `data/outreach.db` (SQLite). Inspect with `sqlite3 data/outreach.db`.
-- Campaign briefs: `campaigns/*.md`. Source of truth — DB rows are derived.
-- Telegram session: lives in your phone; chat_id captured at setup.
-- Unipile session: managed by Unipile (cookie-based or browser-based on their side).
-- Action log: `actions` table — every API call, drafter result, status transition.
+- **DB**: `data/outreach.db` (SQLite). Schema is created and migrated idempotently by `init_db()`; add columns via `_PROSPECT_COLUMNS` and friends, never by hand.
+- **Campaign briefs**: `campaigns/*.md` — source of truth.
+- **Action log**: `actions` table — every API call, drafter result, status transition. Notable kinds: `send_unconfirmed`, `reply_stale`, `accept_detected`, `daily_completed`.
+- **Signals / evidence / positions / research_jobs**: first-class tables. `signals` and `evidence` are append-only by design — a changed world produces a new signal, so the trail of what we believed when we sent a message stays intact.
 
-## Headless mode
+## Tests
 
-`scripts/daily_outreach.sh` is the cron entry: `0 9-16 * * 1-5 .../daily_outreach.sh >> /tmp/log 2>&1`. It calls `linkedin daily` directly — no `claude -p` involved at the cron level. The drafter subagent is the only place Claude Code is invoked, and only during drafting.
+```bash
+PYTHONUTF8=1 PYTHONIOENCODING=utf-8 COLUMNS=200 .venv/Scripts/python.exe -m pytest -q
+```
+
+663 passed, 7 deselected. The offline suite is hermetic by construction: `conftest.py` strips `PHANTOMBUSTER_*` / `LINKEDIN_PRIMARY_*` from the environment so a developer's `.env` cannot make the suite hit the network. Live tests are opt-in via markers.
+
+## Docs
+
+- `docs/RUNBOOK.md` — operator manual; what each command does and what the system refuses to do.
+- `docs/PHANTOMBUSTER_MIGRATION.md` — why Unipile was removed.
+- `docs/TRANSITION_SIGNAL_PLAN.html` — the architecture review behind this phase.
+- `docs/PLAN.md`, `docs/PHASE0_STATUS.md` — historical; predate the PhantomBuster migration and describe a Unipile-backed system. Read them as history, not as current state.
 
 ## Deployment — dedicated Mac (always-on host)
 
-For 24/7 operation (so the cron fires and Telegram approvals process anytime), the recommended setup is a dedicated Mac (laptop or mini) acting as the always-on host. Steps:
+1. Clone to `~/Work/Linkedin_outreach`, run `setup.sh` (venv, deps, Chromium, DB, `.env`).
+2. **Install Claude Code on the host** and run `claude /login` — the drafter shells out to `claude -p` and needs the host authenticated. Verify with `python -c "import shutil; print(shutil.which('claude'))"`.
+3. Install the bot daemon: `./scripts/install_launchd.sh` (starts on login, restarts within 10s on crash, logs to `data/bot-daemon.{out,err}.log`).
+4. Install the cron: `0 9-16 * * 1-5 /Users/<you>/Work/Linkedin_outreach/scripts/daily_outreach.sh >> /tmp/linkedin_outreach.log 2>&1`
+5. **Prevent sleep during work hours** — Lock Screen → "Prevent automatic sleeping when display is off", or `caffeinate -d &`.
+6. Verify: `launchctl list | grep linkedin-bot`, `tail -f data/bot-daemon.out.log`, and a Telegram tap.
 
-1. **Clone the repo** to `~/Work/Linkedin_outreach` on the host Mac.
-2. **Run setup.sh** to create the venv, install deps, pull `playwright` Chromium, initialize the DB, and copy `.env` (Unipile + Telegram creds).
-3. **Install Claude Code on the host** and run `claude /login` once — the drafter invokes `claude -p` and needs the host machine authenticated.
-4. **Install the bot daemon as a LaunchAgent**:
-   ```
-   ./scripts/install_launchd.sh
-   ```
-   This puts a plist under `~/Library/LaunchAgents/com.cortivo.linkedin-bot.plist` that:
-   - Starts the daemon on login
-   - Auto-restarts within 10s if it crashes
-   - Logs to `data/bot-daemon.{out,err}.log`
-5. **Install the daily cron** (replace path):
-   ```
-   crontab -e
-   # add:
-   0 9-16 * * 1-5 /Users/<you>/Work/Linkedin_outreach/scripts/daily_outreach.sh >> /tmp/linkedin_outreach.log 2>&1
-   ```
-6. **Prevent sleep during work hours**. macOS will suspend the daemon when the lid closes (laptop) or the system sleeps. Options:
-   - **System Settings → Lock Screen → "Prevent automatic sleeping when display is off"** (clamshell laptops)
-   - Or run `caffeinate -d &` in a startup item
-   - For a Mac mini: just set `Energy → Prevent automatic sleeping` and you're done
-7. **Verify**:
-   - `launchctl list | grep linkedin-bot` → shows the running daemon's PID
-   - `tail -f data/bot-daemon.out.log` → watch its activity in real time
-   - Open Telegram, message the bot, confirm taps still process
+Daemon lifecycle: `launchctl unload|load ~/Library/LaunchAgents/com.cortivo.linkedin-bot.plist` (re-running `install_launchd.sh` is idempotent).
 
-### Daemon lifecycle commands
-- Stop:    `launchctl unload ~/Library/LaunchAgents/com.cortivo.linkedin-bot.plist`
-- Start:   `launchctl load ~/Library/LaunchAgents/com.cortivo.linkedin-bot.plist`
-- Restart: unload + load (or re-run `./scripts/install_launchd.sh` — it's idempotent)
-- Logs:    `data/bot-daemon.out.log` and `data/bot-daemon.err.log`
-
-### Migrating between Macs
-
-The only state to copy is:
-- `data/outreach.db` — SQLite, scp it
-- `.env` — secrets, scp it
-- `campaigns/*.md` — campaign briefs, already in git
-
-Re-run `./scripts/install_launchd.sh` on the new Mac and you're back online.
+Migrating between Macs: copy `data/outreach.db` and `.env`; briefs are in git. Re-run `install_launchd.sh`.

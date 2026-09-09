@@ -46,7 +46,7 @@ def _adapter():
 
 @click.group()
 def cli() -> None:
-    """LinkedIn outreach agent — drives a configurable backend (Playwright or Unipile)."""
+    """LinkedIn outreach agent — drives a configurable backend (PhantomBuster or Playwright)."""
 
 
 @cli.command()
@@ -61,7 +61,7 @@ def auth() -> None:
     """Interactive LinkedIn login (Playwright backend only)."""
     cfg = load_config()
     if cfg.backend != "playwright":
-        console.print("[yellow]Auth is only required for the Playwright backend. Unipile uses an API key.[/yellow]")
+        console.print("[yellow]Auth is only required for the Playwright backend. PhantomBuster uses an API key.[/yellow]")
         sys.exit(1)
     from .adapters.playwright_adapter import PlaywrightAdapter
     PlaywrightAdapter(cfg).login_interactive()
@@ -904,7 +904,7 @@ def enrich(prospect_id, all_stale, limit) -> None:
 def check_accepts(limit: int | None) -> None:
     """Check `connection_sent` prospects to see who has accepted the invite.
 
-    Without this, the system never notices acceptances (Unipile's messages
+    Without this, the system never notices acceptances (no provider's message
     endpoint doesn't surface them). For each pending invite, fetches the
     profile and checks `network_distance`; if 1st-degree, moves the prospect
     to `connected` so the daily DM1 step drafts a follow-up.
@@ -928,7 +928,7 @@ def check_accepts(limit: int | None) -> None:
 @click.option("--limit", default=50, help="Max messages to fetch per poll.")
 @click.option("--notify/--no-notify", default=True, help="Push Telegram notifications for new replies.")
 def poll(limit: int, notify: bool) -> None:
-    """Fetch recent messages from Unipile; record new inbound replies, halt
+    """Fetch recent inbound messages; record new replies, halt
     follow-up sequences, and notify in Telegram."""
     from .poll import poll_once
     cfg = load_config()
@@ -1054,7 +1054,7 @@ def healthcheck(max_age_minutes: int, quiet: bool) -> None:
 @cli.command("send-approved")
 @click.option("--force", is_flag=True, help="Send even outside the 9-5 Mon-Fri window.")
 def send_approved(force: bool) -> None:
-    """Flush any pending_drafts in status='approved' through Unipile.
+    """Flush any pending_drafts in status='approved' through the provider.
     Respects the send window unless --force."""
     from .bot_daemon import send_draft_via_adapter
     from . import send_window
