@@ -44,6 +44,7 @@ sys.path.insert(0, str(ROOT))
 # function and the evidence module touches no database, so it does not need to
 # wait for LINKEDIN_DB_PATH the way db/drafter do.
 from linkedin_agent import evidence as evidence_mod  # noqa: E402
+from linkedin_agent import evidence_context  # noqa: E402
 
 TOTAL_STAGES = 12
 
@@ -377,19 +378,34 @@ def main() -> int:
                 st.note("observations", len(bundle.observations))
                 st.note("signals", [e.source for e in bundle.signals] or "none")
                 st.note("unknowns", len(bundle.unknowns))
-                # Shape is picked from the prospect, not the model's habits.
-                shape = evidence_mod.choose_shape(bundle, facts.provider_id
-                                                  or linkedin_url)
-                closing = evidence_mod.choose_closing(facts.provider_id
-                                                      or linkedin_url)
-                st.note("email_shape", shape.name)
-                angle = evidence_mod.choose_positioning(
-                    facts, bundle, facts.provider_id or linkedin_url)
-                domain = evidence_mod.matching_proof_domain(facts, bundle)
-                st.note("closing_register", closing.name)
-                st.note("positioning_angle", angle.name)
-                st.note("proof_domain", domain or "(none)")
-                st.note("names_uncertainty", closing.names_uncertainty)
+                # The payload production actually sends. This harness used to
+                # compose it here, which was fine while it was the engine's
+                # only caller; now that daily, followup and poll build one
+                # through evidence_context, composing a second one here would
+                # validate the harness rather than the pipeline.
+                #
+                # The two genuinely differ. Presentation choices travel per
+                # kind (evidence_context._EXTRAS): an email shape is not
+                # attached to a connect note, and dm3 gets none of them, so
+                # `--kind dm1` through the old path exercised a combination
+                # production never produces.
+                payload = evidence_context.build_for(
+                    args.kind, prospect_id,
+                    recent_posts=[{"text": p.text, "posted_at": p.posted_at}
+                                  for p in posts]) or {}
+                none_applied = "(not applied for this kind)"
+                st.note("email_shape",
+                        (payload.get("shape") or {}).get("name", none_applied))
+                st.note("closing_register",
+                        (payload.get("closing") or {}).get("name", none_applied))
+                st.note("positioning_angle",
+                        (payload.get("positioning") or {}).get("name", none_applied))
+                st.note("proof_domain",
+                        (payload.get("positioning") or {}).get("proof_domain")
+                        or "(none)")
+                st.note("names_uncertainty",
+                        (payload.get("closing") or {}).get("names_uncertainty",
+                                                           none_applied))
                 st.note("shapes_available",
                         [x.name for x in evidence_mod.available_shapes(bundle)])
                 if bundle.tier is evidence_mod.Tier.NONE:
@@ -418,8 +434,7 @@ def main() -> int:
                         args.kind, prospect_id,
                         recent_posts=[{"text": p.text, "posted_at": p.posted_at}
                                       for p in posts],
-                        evidence=bundle.as_dict(shape, closing,
-                                                angle, domain),
+                        evidence=payload,
                         attempts_out=tries)
                     drafted_subject, body = drafter_mod.parse_email(raw)
                     _note_attempts(st, tries)
