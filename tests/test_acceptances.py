@@ -1,5 +1,12 @@
 """Tests for the connection-acceptance detection flow.
 
+Retargeted when Unipile was removed. These previously mocked Unipile's
+/users/{id} endpoint with respx; the assertions were always about pipeline
+behaviour — 1st-degree flips a prospect to 'connected', anything else leaves
+it alone — so they now run against a fake provider through the capability
+router instead of a transport that no longer exists.
+
+
 When someone accepts our connection invite, LinkedIn doesn't surface it via
 the messages endpoint — so the cron has to actively poll profile-distance
 for every prospect in `connection_sent` status. This file covers:
@@ -11,9 +18,9 @@ for every prospect in `connection_sent` status. This file covers:
 
 from __future__ import annotations
 
-import httpx
 import pytest
-import respx
+
+from tests.fakes import FakeProvider, fake_router
 
 
 def _cfg(**overrides):
@@ -52,20 +59,14 @@ def _seed_connection_sent(provider_id="ACoTEST123"):
 # ===== detection rule ======================================================
 
 @pytest.mark.integration
-@respx.mock
 def test_check_acceptances_flips_first_degree_to_connected(db_env):
     """A prospect whose API response now shows FIRST_DEGREE moves to 'connected'."""
     from linkedin_agent import db, enrichment
     pid = _seed_connection_sent(provider_id="ACoFIRSTDEG")
 
-    respx.get("https://api21.unipile.com:15165/api/v1/users/ACoFIRSTDEG").mock(
-        return_value=httpx.Response(200, json={
-            "network_distance": "FIRST_DEGREE",
-            "headline": "Test", "follower_count": 100,
-        })
-    )
+    provider = FakeProvider(accepted=True)
 
-    result = enrichment.check_acceptances(_cfg())
+    result = enrichment.check_acceptances(_cfg(), router=fake_router(provider))
 
     assert result.detected == 1
     assert result.still_pending == 0
@@ -73,20 +74,14 @@ def test_check_acceptances_flips_first_degree_to_connected(db_env):
 
 
 @pytest.mark.integration
-@respx.mock
 def test_check_acceptances_leaves_still_pending_alone(db_env):
     """A prospect still at 2nd-degree stays in 'connection_sent'."""
     from linkedin_agent import db, enrichment
     pid = _seed_connection_sent(provider_id="ACoSTILLPND")
 
-    respx.get("https://api21.unipile.com:15165/api/v1/users/ACoSTILLPND").mock(
-        return_value=httpx.Response(200, json={
-            "network_distance": "SECOND_DEGREE",
-            "headline": "Test",
-        })
-    )
+    provider = FakeProvider(accepted=False)
 
-    result = enrichment.check_acceptances(_cfg())
+    result = enrichment.check_acceptances(_cfg(), router=fake_router(provider))
 
     assert result.detected == 0
     assert result.still_pending == 1
@@ -94,8 +89,8 @@ def test_check_acceptances_leaves_still_pending_alone(db_env):
 
 
 @pytest.mark.integration
-@respx.mock
 def test_check_acceptances_skips_prospects_without_provider_id(db_env):
+    provider = FakeProvider(accepted=True)
     """No provider_id → can't look them up → skip silently (don't error)."""
     from linkedin_agent import db, enrichment
     pid = db.upsert_prospect(
@@ -106,7 +101,7 @@ def test_check_acceptances_skips_prospects_without_provider_id(db_env):
         conn.execute("UPDATE prospects SET status='connection_sent' WHERE id=?", (pid,))
 
     # No mocks set — if we tried to fetch, respx would fail.
-    result = enrichment.check_acceptances(_cfg())
+    result = enrichment.check_acceptances(_cfg(), router=fake_router(provider))
 
     assert result.detected == 0
     assert result.still_pending == 0
@@ -114,17 +109,14 @@ def test_check_acceptances_skips_prospects_without_provider_id(db_env):
 
 
 @pytest.mark.integration
-@respx.mock
 def test_check_acceptances_logs_accept_detected_action(db_env):
     """Detected acceptance writes an 'accept_detected' row in the action log."""
     from linkedin_agent import db, enrichment
     pid = _seed_connection_sent(provider_id="ACoLOGTEST")
 
-    respx.get("https://api21.unipile.com:15165/api/v1/users/ACoLOGTEST").mock(
-        return_value=httpx.Response(200, json={"network_distance": "FIRST_DEGREE"})
-    )
+    provider = FakeProvider(accepted=True)
 
-    enrichment.check_acceptances(_cfg())
+    enrichment.check_acceptances(_cfg(), router=fake_router(provider))
 
     with db.connect() as conn:
         rows = conn.execute(
@@ -137,20 +129,19 @@ def test_check_acceptances_logs_accept_detected_action(db_env):
 # ===== daily.py integration ================================================
 
 @pytest.mark.integration
-@respx.mock
-def test_daily_runs_acceptance_check_and_drafts_dm1_same_cycle(db_env, fake_telegram):
+def test_daily_runs_acceptance_check_and_drafts_dm1_same_cycle(db_env, fake_telegram, monkeypatch):
     """End-to-end: a prospect in connection_sent gets detected as accepted,
     flipped to 'connected', and the SAME daily run drafts a DM1 for them."""
     from linkedin_agent import daily as daily_mod, db
     from linkedin_agent.adapters import get_adapter
     pid = _seed_connection_sent(provider_id="ACoDAILYINT")
 
-    respx.get("https://api21.unipile.com:15165/api/v1/users/ACoDAILYINT").mock(
-        return_value=httpx.Response(200, json={"network_distance": "FIRST_DEGREE"})
-    )
-    respx.get("https://api21.unipile.com:15165/api/v1/messages").mock(
-        return_value=httpx.Response(200, json={"items": [], "cursor": None})
-    )
+    # The fake backend serves the adapter; the router (built inside daily)
+    # serves the acceptance check, which the fake provider answers.
+    provider = FakeProvider(accepted=True)
+    for target in ("linkedin_agent.providers.build_router",
+                   "linkedin_agent.enrichment.build_router"):
+        monkeypatch.setattr(target, lambda cfg, **kw: fake_router(provider))
 
     def stub_drafter(kind, prospect_id, recent_posts=None):
         return f"stub-{kind} body that meets the minimum length for a draft, padded with extra words to clear the 350-char DM1 minimum. " * 4
@@ -169,3 +160,179 @@ def test_daily_runs_acceptance_check_and_drafts_dm1_same_cycle(db_env, fake_tele
     assert refreshed["status"] == "connected"
     # AND the dm1 step ran in the same cycle (no waiting for next cron)
     assert result.dm1_drafts == 1
+
+
+# ===== per-cycle budget ====================================================
+
+@pytest.mark.integration
+def test_daily_bounds_how_many_invites_it_checks(db_env, fake_telegram, monkeypatch):
+    """An hourly cron must be able to finish.
+
+    Under Unipile an acceptance check was one ~30ms GET, so the call was made
+    unbounded. PhantomBuster answers the same question with a full profile
+    re-scrape — a container launch, a browser boot, wait() up to 300s, plus
+    result-settle retries. Twenty pending invites then meant twenty Phantom
+    launches inside one tick, and the run could not finish before the next one
+    started.
+
+    Nothing is lost, only deferred: a detected accept leaves the queue, so
+    successive ticks work through the backlog.
+    """
+    from linkedin_agent import daily as daily_mod, db
+    from linkedin_agent.adapters import get_adapter
+
+    for n in range(10):
+        pid = db.upsert_prospect(
+            linkedin_url=f"https://www.linkedin.com/in/budget-{n}",
+            full_name=f"Budget {n}",
+            provider_id=f"ACoBUDGET{n:04d}",
+        )
+        with db.connect() as conn:
+            conn.execute("UPDATE prospects SET status='connection_sent' WHERE id=?",
+                         (pid,))
+
+    checked: list[str] = []
+
+    class CountingProvider(FakeProvider):
+        def check_acceptance(self, identifier):
+            checked.append(identifier)
+            return False        # nobody accepts, so none leave the queue
+
+    provider = CountingProvider()
+    for target in ("linkedin_agent.providers.build_router",
+                   "linkedin_agent.enrichment.build_router"):
+        monkeypatch.setattr(target, lambda cfg, **kw: fake_router(provider))
+
+    cfg = _cfg()
+    adapter = get_adapter(cfg)
+    try:
+        daily_mod.run_daily(cfg, adapter=adapter, telegram=fake_telegram,
+                            drafter=lambda *a, **k: "unused")
+    finally:
+        adapter.close()
+
+    assert len(checked) == daily_mod._ACCEPTANCE_CHECK_BUDGET
+    assert len(checked) < 10, "the whole queue was checked in one tick"
+
+
+@pytest.mark.unit
+def test_acceptance_budget_is_configurable_and_can_be_lifted(monkeypatch):
+    """A faster provider should not be held to a slow provider's ceiling."""
+    from linkedin_agent import daily as daily_mod
+
+    monkeypatch.delenv("DAILY_MAX_ACCEPTANCE_CHECKS", raising=False)
+    assert daily_mod._acceptance_check_budget() == daily_mod._ACCEPTANCE_CHECK_BUDGET
+
+    monkeypatch.setenv("DAILY_MAX_ACCEPTANCE_CHECKS", "25")
+    assert daily_mod._acceptance_check_budget() == 25
+
+    monkeypatch.setenv("DAILY_MAX_ACCEPTANCE_CHECKS", "0")
+    assert daily_mod._acceptance_check_budget() is None, "0 means unbounded"
+
+    monkeypatch.setenv("DAILY_MAX_ACCEPTANCE_CHECKS", "not-a-number")
+    assert daily_mod._acceptance_check_budget() == daily_mod._ACCEPTANCE_CHECK_BUDGET
+
+
+@pytest.mark.integration
+def test_the_budget_rotates_instead_of_re_checking_one_fixed_head(db_env, monkeypatch):
+    """A bound that always checks the same prospects is a cut, not a defer.
+
+    The first version sliced db.list_prospects, which orders by last_action_at
+    DESC NULLS LAST. A still-pending check writes no action, so the ordering
+    was identical every tick: the same head was re-checked hourly and the tail
+    was never reached. Worse, DESC put the NEWEST invites first — the ones
+    least likely to have been accepted yet.
+    """
+    from linkedin_agent import db, enrichment
+
+    for n in range(9):
+        pid = db.upsert_prospect(
+            linkedin_url=f"https://www.linkedin.com/in/rotate-{n}",
+            full_name=f"Rotate {n}",
+            provider_id=f"ACoROTATE{n:04d}",
+        )
+        with db.connect() as conn:
+            conn.execute("UPDATE prospects SET status='connection_sent' WHERE id=?",
+                         (pid,))
+
+    seen: list[list[str]] = []
+
+    class CountingProvider(FakeProvider):
+        def check_acceptance(self, identifier):
+            seen[-1].append(identifier)
+            return False        # nobody accepts, so nobody leaves the queue
+
+    for _ in range(3):
+        seen.append([])
+        enrichment.check_acceptances(_cfg(), limit=3,
+                                     router=fake_router(CountingProvider()))
+
+    assert [len(batch) for batch in seen] == [3, 3, 3]
+    assert not (set(seen[0]) & set(seen[1])), "tick 2 re-checked tick 1's batch"
+    assert not (set(seen[1]) & set(seen[2])), "tick 3 re-checked tick 2's batch"
+    # Three ticks of three covers all nine — nothing is starved.
+    assert len(set(seen[0]) | set(seen[1]) | set(seen[2])) == 9
+
+
+@pytest.mark.integration
+def test_a_pending_check_is_stamped_so_it_moves_to_the_tail(db_env):
+    """The rotation rests on stamping every check, not just the ones that
+    detect an accept. Stamping only on success recreates the starvation."""
+    from linkedin_agent import db, enrichment
+
+    pid = _seed_connection_sent(provider_id="ACoSTAMPED")
+    assert db.get_prospect(pid)["acceptance_checked_at"] is None
+
+    enrichment.check_acceptances(_cfg(), router=fake_router(FakeProvider(accepted=False)))
+
+    row = db.get_prospect(pid)
+    assert row["status"] == "connection_sent", "still pending, correctly"
+    assert row["acceptance_checked_at"] is not None, "a pending check must stamp"
+
+
+@pytest.mark.integration
+def test_a_check_that_raises_still_spends_its_slot(db_env):
+    """A failing check must not squat a budget slot forever.
+
+    The stamp originally sat after the provider call, inside the try, so an
+    exception skipped it — and NULL sorts first in the rotation. A prospect
+    whose check reliably throws (deleted profile, an id the Phantom cannot
+    resolve) was then re-checked on every tick indefinitely, burning a
+    container launch an hour on something that can never resolve. Four of them
+    and the rotation is dead.
+    """
+    from linkedin_agent import db, enrichment
+
+    ids = {}
+    for name in ("BAD", "GOOD0", "GOOD1", "GOOD2"):
+        pid = db.upsert_prospect(
+            linkedin_url=f"https://www.linkedin.com/in/slot-{name.lower()}",
+            full_name=f"Slot {name}",
+            provider_id=f"ACo{name}",
+        )
+        ids[name] = pid
+        with db.connect() as conn:
+            conn.execute("UPDATE prospects SET status='connection_sent' WHERE id=?",
+                         (pid,))
+
+    class FlakyProvider(FakeProvider):
+        def check_acceptance(self, identifier):
+            if identifier == "ACoBAD":
+                raise RuntimeError("profile no longer exists")
+            return False
+
+    batches = []
+    for _ in range(2):
+        before = {n: db.get_prospect(i)["acceptance_checked_at"] for n, i in ids.items()}
+        enrichment.check_acceptances(_cfg(), limit=2,
+                                     router=fake_router(FlakyProvider()))
+        after = {n: db.get_prospect(i)["acceptance_checked_at"] for n, i in ids.items()}
+        batches.append({n for n in ids if before[n] != after[n]})
+
+    assert db.get_prospect(ids["BAD"])["acceptance_checked_at"] is not None, \
+        "a raising check left the prospect unstamped"
+    # Four prospects, two per tick: two ticks give everyone exactly one turn,
+    # and the failing one takes a slot once rather than every time.
+    assert sum("BAD" in b for b in batches) == 1
+    assert not (batches[0] & batches[1])
+    assert batches[0] | batches[1] == set(ids)

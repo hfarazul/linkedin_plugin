@@ -26,6 +26,16 @@ from .fakes import FakeTelegramClient
 def _clear_env_overrides(monkeypatch):
     for var in ("LINKEDIN_DISABLE_SEND_WINDOW", "LINKEDIN_FAKE_WINDOW"):
         monkeypatch.delenv(var, raising=False)
+    # Provider credentials must never leak from the developer's .env into the
+    # offline suite. While poll.py gated on Unipile keys the fixture happened
+    # to be safe; once it started building a router from PHANTOMBUSTER_API_KEY,
+    # `daily` tests began making real API calls and failing on live 404s and
+    # 429s. Clearing them here keeps the suite hermetic by construction rather
+    # than by luck — a test that wants a provider injects a fake.
+    for var in list(os.environ):
+        if var.startswith(("PHANTOMBUSTER_", "UNIPILE_", "LINKEDIN_PRIMARY_",
+                           "LINKEDIN_FALLBACK_")):
+            monkeypatch.delenv(var, raising=False)
 
 
 # ----- env fixture (was in test_smoke.py) -----------------------------------

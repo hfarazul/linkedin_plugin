@@ -23,7 +23,8 @@ from typing import Optional
 from . import db, safety, send_window
 from .adapters import get_adapter
 from .config import Config, load as load_config
-from .telegram import TelegramClient, TelegramError
+from .providers.router_adapter import is_unconfirmed
+from .telegram import TelegramClient, TelegramError, install_log_redaction
 
 logger = logging.getLogger("linkedin.bot")
 
@@ -271,7 +272,14 @@ def send_draft_via_adapter(cfg: Config, adapter, draft, *, source: str = "cli") 
     When cfg.dry_run is True, the LinkedIn write is skipped but the local
     state still advances (prospect status, dm_count, draft marked sent) so
     the rest of the pipeline behaves identically to a real send. The action
-    log records dry_run=True so the audit trail makes the distinction clear."""
+    log records dry_run=True so the audit trail makes the distinction clear.
+
+    A provider may also report that it dispatched a write without being able
+    to say it arrived — PhantomBuster reports container-level success, not
+    per-recipient outcome. That is neither success nor failure, and it is
+    handled as its own case: the pipeline still advances (so nothing is sent
+    twice) but the follow-up clock does not start (so nothing is chased on the
+    strength of a message nobody saw arrive). See db.record_dm."""
     prospect = db.get_prospect(draft["prospect_id"])
     if not prospect:
         raise RuntimeError(f"prospect {draft['prospect_id']} missing")
@@ -286,20 +294,42 @@ def send_draft_via_adapter(cfg: Config, adapter, draft, *, source: str = "cli") 
             api_result = "dry_run"
         else:
             api_result = adapter.send_connection(url, note=body)
+        unconfirmed = is_unconfirmed(api_result)
+        # Advance regardless: a second invitation to someone who already has
+        # one is the failure to avoid, and the acceptance check resolves the
+        # truth of this one on its own schedule.
         db.set_status(pid, "connection_sent")
+        # A connect note is a message we sent them, and recording it as one
+        # fixes two things that both come from its absence.
+        #
+        # Reply detection: poll decides whether an inbound halts the sequence
+        # by asking whether it post-dates our last outbound. With no outbound
+        # row, every prospect at connection_sent or connected fell through to
+        # the age fallback — and a reply to a connect note is the commonest
+        # inbound there is, so the cohort most likely to answer was the one
+        # least protected.
+        #
+        # Drafting: build_input reads `messages` for dm2/dm3/reply context,
+        # so the thread it showed the drafter was missing its first turn.
+        db.record_message(pid, "outbound", body)
         db.log_action(pid, "connect", json.dumps({"note": body[:200], "via": source}),
                       api_result, cfg.dry_run)
+        if unconfirmed:
+            log_unconfirmed(pid, kind, source)
     elif kind in ("dm1", "dm2", "dm3"):
         safety.check_cap(cfg, "dm")
         if cfg.dry_run:
             api_result = "dry_run"
         else:
             api_result = adapter.send_dm(url, body)
+        unconfirmed = is_unconfirmed(api_result)
         db.set_status(pid, "dm_sent")
         db.record_message(pid, "outbound", body)
-        db.record_dm(pid)
+        db.record_dm(pid, confirmed=not unconfirmed)
         db.log_action(pid, "dm", json.dumps({"kind": kind, "via": source}),
                       api_result, cfg.dry_run)
+        if unconfirmed:
+            log_unconfirmed(pid, kind, source)
     elif kind == "reply":
         # Replies go out as DMs and count against the DM cap. They do NOT
         # change status (prospect stays 'replied' — we're in active
@@ -313,14 +343,38 @@ def send_draft_via_adapter(cfg: Config, adapter, draft, *, source: str = "cli") 
         db.record_message(pid, "outbound", body)
         db.log_action(pid, "reply_sent", json.dumps({"via": source}),
                       api_result, cfg.dry_run)
+        if is_unconfirmed(api_result):
+            log_unconfirmed(pid, kind, source)
     else:
         raise RuntimeError(f"unknown draft kind {kind!r}")
 
     db.set_draft_status(draft["id"], "sent")
 
 
+def log_unconfirmed(prospect_id: int, kind: str, source: str) -> None:
+    """Record that a write went out without delivery confirmation.
+
+    Its own action kind rather than a detail buried in the send row, so
+    `status` can count these and an operator can find them without parsing
+    result strings. Nothing automated acts on it: deciding whether an
+    unconfirmed message actually arrived means looking at LinkedIn, which is
+    exactly the judgement this system does not make on its own.
+    """
+    logger.warning(
+        "prospect %d: %s dispatched but delivery unconfirmed — pipeline "
+        "advanced to avoid a duplicate; follow-up clock NOT started",
+        prospect_id, kind)
+    db.log_action(prospect_id, "send_unconfirmed",
+                  json.dumps({"kind": kind, "via": source}),
+                  "delivery unobserved", False)
+
+
 def run() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # Install before anything can emit a request log — INFO-level httpx logging
+    # would otherwise write the bot token (embedded in every Telegram API URL)
+    # to data/bot-daemon.err.log on every poll.
+    install_log_redaction()
     cfg = load_config()
     db.init_db()
     daemon = BotDaemon(cfg)

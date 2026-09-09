@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -79,6 +81,124 @@ CREATE TABLE IF NOT EXISTS pending_drafts (
 
 CREATE INDEX IF NOT EXISTS idx_drafts_status ON pending_drafts(status);
 CREATE INDEX IF NOT EXISTS idx_drafts_prospect ON pending_drafts(prospect_id);
+
+-- A detected event about a prospect: a funding round, a hiring post, a career
+-- transition. Signals are the structured record of WHY we are reaching out;
+-- prospects.pitch_context becomes a rendered projection of the active one.
+--
+-- Append-only. Nothing updates a signal's facts — a changed world produces a
+-- new signal, so the trail of what we believed when we sent a message stays
+-- intact. Only `status` moves, tracking what we did about it.
+CREATE TABLE IF NOT EXISTS signals (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    prospect_id     INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+    kind            TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'new',
+    confidence      TEXT NOT NULL,
+    detected_at     TEXT NOT NULL,
+    occurred_at     TEXT,
+    expires_at      TEXT,
+    payload         TEXT,
+    -- Stable identity for the underlying real-world event. The UNIQUE index is
+    -- what makes re-scouting the same person idempotent: a second detection of
+    -- the same transition collides here instead of producing a duplicate
+    -- signal and a duplicate draft.
+    dedup_key       TEXT NOT NULL UNIQUE
+);
+
+CREATE INDEX IF NOT EXISTS idx_signals_prospect ON signals(prospect_id);
+CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(status, kind);
+
+-- One supporting fact per row. Every personalized claim in a draft must trace
+-- to one of these, which is what makes a sent message auditable months later.
+--
+-- Append-only and never edited: there are deliberately no update or delete
+-- helpers. Evidence that turns out to be wrong is superseded by a new signal,
+-- not rewritten.
+CREATE TABLE IF NOT EXISTS evidence (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_id       INTEGER NOT NULL REFERENCES signals(id) ON DELETE CASCADE,
+    claim           TEXT NOT NULL,
+    source_type     TEXT NOT NULL,
+    source_url      TEXT,
+    raw_excerpt     TEXT,
+    fetched_at      TEXT NOT NULL,
+    -- Hash of raw_excerpt, so we can later tell whether a claim was built from
+    -- source text that has since changed upstream.
+    checksum        TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_evidence_signal ON evidence(signal_id);
+
+-- One job in a prospect's history, normalized across providers.
+--
+-- Stored rather than fetched on demand because detection is a pure function
+-- over these rows: re-running a detector after a rule change costs nothing and
+-- spends no scraping budget.
+--
+-- date_precision is carried explicitly because the providers disagree. Unipile
+-- emits "1/1/YYYY" when only a year is known; PhantomBuster emits "Feb 2026".
+-- A detector asking "did this start within 180 days?" cannot answer honestly
+-- from a year, so precision has to travel with the value instead of being
+-- inferred from it.
+CREATE TABLE IF NOT EXISTS positions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    prospect_id     INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+    company         TEXT NOT NULL,
+    company_id      TEXT,
+    company_url     TEXT,
+    title           TEXT,
+    started_at      TEXT,
+    ended_at        TEXT,
+    is_current      INTEGER NOT NULL DEFAULT 0,
+    date_precision  TEXT NOT NULL DEFAULT 'unknown',
+    location        TEXT,
+    description     TEXT,
+    source          TEXT NOT NULL DEFAULT 'unknown',
+    raw_json        TEXT,
+    fetched_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_positions_prospect ON positions(prospect_id, started_at);
+
+-- Outstanding provider work that cannot be waited on inline.
+--
+-- Unipile answers in milliseconds; PhantomBuster boots a browser and scrapes
+-- for seconds to minutes. Blocking on the latter inside daily.py's per-prospect
+-- loop would make an hourly cron overrun its own schedule, so async work is
+-- submitted on one tick and collected on a later one.
+--
+-- Synchronous providers still get a row: they are submitted and completed in
+-- the same call, which keeps one code path and one audit trail regardless of
+-- which provider served the request.
+CREATE TABLE IF NOT EXISTS research_jobs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    capability      TEXT NOT NULL,
+    provider        TEXT NOT NULL,
+    prospect_id     INTEGER REFERENCES prospects(id) ON DELETE CASCADE,
+    target          TEXT,               -- identifier the job was launched for
+    container_id    TEXT,               -- provider-side run id, async only
+    status          TEXT NOT NULL DEFAULT 'running',
+    arguments       TEXT,
+    result_summary  TEXT,
+    error           TEXT,
+    submitted_at    TEXT NOT NULL,
+    completed_at    TEXT,
+    attempts        INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON research_jobs(status, submitted_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_prospect ON research_jobs(prospect_id);
+"""
+
+VALID_JOB_STATUSES = ("running", "finished", "failed", "timeout")
+
+# Identity of a position, so re-enriching the same prospect updates rows rather
+# than accumulating duplicates. Created after the table for the same reason the
+# messages index is: it must survive a DB that predates the column set.
+_POSITIONS_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_identity
+    ON positions(prospect_id, company, title, started_at);
 """
 
 # Pipeline statuses tracked on prospects.status.
@@ -103,9 +223,26 @@ VALID_DISPOSITIONS = (
     "deferred",
 )
 
-VALID_DRAFT_KINDS = ("connect_note", "dm1", "dm2", "dm3", "reply")
+# email1 is draftable today; SENDING email is not implemented (Phase 5).
+VALID_DRAFT_KINDS = ("connect_note", "dm1", "dm2", "dm3", "reply", "email1")
 VALID_DRAFT_STATUSES = ("pending", "approved", "rejected", "sent")
 VALID_CAMPAIGN_STATUSES = ("active", "paused", "archived")
+
+# Where a signal is in its lifecycle. Only this field moves after insert —
+# the facts a signal records are immutable.
+VALID_SIGNAL_STATUSES = (
+    "new",         # detected, not yet qualified
+    "qualified",   # passed the ICP gates, eligible to draft from
+    "drafted",     # a draft has been produced for it
+    "actioned",    # the draft was approved and sent
+    "dismissed",   # rejected by a human or by a gate
+    "expired",     # aged out; must never produce a draft
+)
+
+# Three tiers, not a float: a number invites false precision and an argument
+# about thresholds. Each tier maps to a distinct behaviour — 'high' may state
+# the signal as fact, 'medium' must hedge, 'low' never reaches the drafter.
+VALID_CONFIDENCE = ("high", "medium", "low")
 
 
 def now() -> str:
@@ -153,10 +290,35 @@ _PROSPECT_COLUMNS = {
     "pronoun":                   "TEXT",     # "She/Her", "He/Him", etc.
     "last_post_at":              "TEXT",     # ISO timestamp of most recent post
     "enriched_at":               "TEXT",     # when enrichment last ran
+    # When we last asked whether this invite had been accepted — set on every
+    # check, accepted or not.
+    #
+    # The "or not" is the whole point. Acceptance checks are bounded per cycle
+    # now that each one costs a profile re-scrape, and the candidate list was
+    # ordered by last_action_at, which a still-pending check does not touch.
+    # So the same head-of-list invites were re-checked every hour and the rest
+    # were never reached at all. Ordering on this column instead makes the
+    # bound a rotation rather than a permanent cut.
+    "acceptance_checked_at":     "TEXT",
 }
 
 _MESSAGE_COLUMNS = {
     "external_id": "TEXT",
+    # Channel groundwork. Everything existing is LinkedIn, and the default
+    # keeps it that way, so no read path changes. Keeping both channels in one
+    # table means drafter.build_input()'s prior_messages query keeps working
+    # unchanged and a reply draft can see the whole relationship, not half of it.
+    "channel":     "TEXT NOT NULL DEFAULT 'linkedin'",
+    "subject":     "TEXT",   # email only; NULL for LinkedIn messages
+    "thread_id":   "TEXT",   # provider-side conversation id
+}
+
+_DRAFT_COLUMNS = {
+    "channel":   "TEXT NOT NULL DEFAULT 'linkedin'",
+    "subject":   "TEXT",
+    # The signal that justified this draft. The audit link that lets us answer
+    # "why did we send this?" from the draft alone.
+    "signal_id": "INTEGER REFERENCES signals(id)",
 }
 
 
@@ -170,6 +332,7 @@ def _add_missing_columns(conn: sqlite3.Connection, table: str, columns: dict[str
 def _migrate(conn: sqlite3.Connection) -> None:
     _add_missing_columns(conn, "prospects", _PROSPECT_COLUMNS)
     _add_missing_columns(conn, "messages", _MESSAGE_COLUMNS)
+    _add_missing_columns(conn, "pending_drafts", _DRAFT_COLUMNS)
 
 
 # The unique partial index on messages.external_id can only be created after
@@ -187,6 +350,7 @@ def init_db() -> None:
         conn.executescript(SCHEMA)
         _migrate(conn)
         conn.executescript(_POST_MIGRATE_INDEXES)
+        conn.executescript(_POSITIONS_INDEX)
 
 
 # --- prospects --------------------------------------------------------------
@@ -257,12 +421,46 @@ def set_disposition(prospect_id: int, disposition: str) -> None:
         )
 
 
-def record_dm(prospect_id: int) -> None:
-    """Called after a DM is successfully sent. Bumps dm_count and last_dm_at."""
+def record_dm(prospect_id: int, *, confirmed: bool) -> None:
+    """Called after a DM is dispatched. Always bumps dm_count; sets last_dm_at
+    only when delivery was actually confirmed.
+
+    `confirmed` is required rather than defaulting to True. A default would
+    hand the old, wrong behaviour to every call site that was not migrated,
+    silently — which is exactly what happened to `linkedin dm` when this
+    argument was first introduced with a default. The compiler cannot catch a
+    keyword default; it can catch a missing required one.
+
+    The two columns answer different questions, and an unconfirmed send needs
+    different answers to each:
+
+      dm_count    "have we already tried to send this one?"  Bumped either
+                  way. Without it the daily cycle sees dm_count=0 and drafts
+                  dm1 again on the next tick, and again on the one after —
+                  re-sending is a worse failure than any bookkeeping gap.
+
+      last_dm_at  "when did they last receive something?"  Cleared when nobody
+                  can say they did. PhantomBuster reports that a container
+                  finished, not that a recipient got anything, and a follow-up
+                  cadence measured from a send that may never have landed
+                  produces "circling back on what I sent last week" to someone
+                  who was sent nothing.
+
+    Cleared rather than left at its previous value: an unconfirmed dm2 that
+    kept dm1's timestamp would still let dm3 come due, timed from a message two
+    steps back. The scheduling field means "when we know they last heard from
+    us", and after an unobserved send we do not know. The real history is in
+    `messages` and `actions`, neither of which this touches.
+
+    NULL last_dm_at makes is_dm2_due / is_dm3_due return False, so the prospect
+    parks rather than advancing on an unverified premise. `status` surfaces
+    these under unconfirmed sends so parked is not the same as forgotten.
+    """
     with connect() as conn:
         conn.execute(
-            "UPDATE prospects SET dm_count = dm_count + 1, last_dm_at = ? WHERE id = ?",
-            (now(), prospect_id),
+            "UPDATE prospects SET dm_count = dm_count + 1, last_dm_at = ? "
+            "WHERE id = ?",
+            (now() if confirmed else None, prospect_id),
         )
 
 
@@ -323,15 +521,32 @@ def record_message(
     direction: str,
     body: str,
     external_id: str | None = None,
+    *,
+    channel: str = "linkedin",
+    subject: str | None = None,
+    thread_id: str | None = None,
+    sent_at: str | None = None,
 ) -> int | None:
     """Insert a message row. Returns the new row id, or None if external_id
-    collides (deduplication during polling)."""
+    collides (deduplication during polling).
+
+    The keyword-only arguments are additive and all default to today's
+    behaviour, so every existing call site keeps working untouched.
+
+    `sent_at` accepts the provider's own timestamp. Defaulting it to now() —
+    which is what happens when it is omitted — records when we *observed* a
+    message rather than when it was sent, and the two diverge badly with a
+    batch scraper that may surface a reply hours after it arrived.
+    """
     with connect() as conn:
         try:
             cur = conn.execute(
-                """INSERT INTO messages (prospect_id, direction, body, external_id, sent_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (prospect_id, direction, body, external_id, now()),
+                """INSERT INTO messages
+                   (prospect_id, direction, body, external_id, channel,
+                    subject, thread_id, sent_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (prospect_id, direction, body, external_id, channel,
+                 subject, thread_id, sent_at or now()),
             )
             return int(cur.lastrowid)
         except sqlite3.IntegrityError:
@@ -462,3 +677,282 @@ def cancel_pending_drafts_for(prospect_id: int, reason: str) -> int:
             (now(), reason, prospect_id),
         )
         return cur.rowcount
+
+
+# --- positions --------------------------------------------------------------
+
+
+def replace_positions(prospect_id: int, positions: list) -> int:
+    """Persist a prospect's job history, replacing what a previous run stored.
+
+    Replace rather than append: a profile is a snapshot, and a person editing
+    or removing a role should not leave a stale row behind for a detector to
+    reason from. Positions carry no independent history of their own — the
+    audit trail lives in `evidence`, which quotes what was true when a message
+    went out.
+
+    Takes provider-neutral Position objects (providers.capabilities.Position),
+    so both vendors write identical rows.
+    """
+    stamp = now()
+    with connect() as conn:
+        conn.execute("DELETE FROM positions WHERE prospect_id = ?", (prospect_id,))
+        written = 0
+        for p in positions:
+            try:
+                conn.execute(
+                    """INSERT INTO positions
+                       (prospect_id, company, company_id, company_url, title,
+                        started_at, ended_at, is_current, date_precision,
+                        location, description, source, raw_json, fetched_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (prospect_id, p.company, p.company_id, p.company_url, p.title,
+                     p.start_date, p.end_date, 1 if p.is_current else 0,
+                     p.date_precision, p.location, p.description, p.source,
+                     json.dumps(p.raw) if p.raw else None, stamp),
+                )
+                written += 1
+            except sqlite3.IntegrityError:
+                # Same company/title/start twice in one payload — keep the first.
+                continue
+        return written
+
+
+def list_positions(prospect_id: int) -> list[sqlite3.Row]:
+    """Newest first. Positions with no parseable start sort last rather than
+    appearing recent."""
+    with connect() as conn:
+        cur = conn.execute(
+            """SELECT * FROM positions WHERE prospect_id = ?
+               ORDER BY started_at IS NULL, started_at DESC""",
+            (prospect_id,),
+        )
+        return list(cur.fetchall())
+
+
+# --- research jobs ----------------------------------------------------------
+
+
+def create_job(capability: str, provider: str, *, prospect_id: int | None = None,
+               target: str | None = None, container_id: str | None = None,
+               arguments: str | None = None, status: str = "running") -> int:
+    if status not in VALID_JOB_STATUSES:
+        raise ValueError(f"invalid job status {status!r}; expected one of {VALID_JOB_STATUSES}")
+    with connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO research_jobs
+               (capability, provider, prospect_id, target, container_id,
+                arguments, status, submitted_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (capability, provider, prospect_id, target, container_id,
+             arguments, status, now()),
+        )
+        return int(cur.lastrowid)
+
+
+def finish_job(job_id: int, *, status: str, result_summary: str | None = None,
+               error: str | None = None) -> None:
+    if status not in VALID_JOB_STATUSES:
+        raise ValueError(f"invalid job status {status!r}; expected one of {VALID_JOB_STATUSES}")
+    with connect() as conn:
+        conn.execute(
+            """UPDATE research_jobs
+               SET status = ?, result_summary = ?, error = ?, completed_at = ?
+               WHERE id = ?""",
+            (status, result_summary, error, now(), job_id),
+        )
+
+
+def bump_job_attempts(job_id: int) -> int:
+    """Count poll attempts so a wedged container can be timed out rather than
+    polled forever on every cron tick."""
+    with connect() as conn:
+        conn.execute(
+            "UPDATE research_jobs SET attempts = attempts + 1 WHERE id = ?", (job_id,))
+        row = conn.execute(
+            "SELECT attempts FROM research_jobs WHERE id = ?", (job_id,)).fetchone()
+        return int(row["attempts"]) if row else 0
+
+
+def list_open_jobs(capability: str | None = None, limit: int = 100) -> list[sqlite3.Row]:
+    with connect() as conn:
+        if capability:
+            cur = conn.execute(
+                """SELECT * FROM research_jobs WHERE status = 'running'
+                   AND capability = ? ORDER BY submitted_at LIMIT ?""",
+                (capability, limit))
+        else:
+            cur = conn.execute(
+                """SELECT * FROM research_jobs WHERE status = 'running'
+                   ORDER BY submitted_at LIMIT ?""", (limit,))
+        return list(cur.fetchall())
+
+
+def get_job(job_id: int) -> sqlite3.Row | None:
+    with connect() as conn:
+        return conn.execute(
+            "SELECT * FROM research_jobs WHERE id = ?", (job_id,)).fetchone()
+
+
+def has_open_job(capability: str, prospect_id: int) -> bool:
+    """Prevents re-submitting work already in flight — the async equivalent of
+    the `_has_pending_draft` guard in daily.py."""
+    with connect() as conn:
+        cur = conn.execute(
+            """SELECT 1 FROM research_jobs
+               WHERE status = 'running' AND capability = ? AND prospect_id = ?
+               LIMIT 1""", (capability, prospect_id))
+        return cur.fetchone() is not None
+
+
+def list_jobs(status: str | None = None, limit: int = 50) -> list[sqlite3.Row]:
+    with connect() as conn:
+        if status:
+            cur = conn.execute(
+                "SELECT * FROM research_jobs WHERE status = ? "
+                "ORDER BY submitted_at DESC LIMIT ?", (status, limit))
+        else:
+            cur = conn.execute(
+                "SELECT * FROM research_jobs ORDER BY submitted_at DESC LIMIT ?",
+                (limit,))
+        return list(cur.fetchall())
+
+
+# --- signals + evidence -----------------------------------------------------
+#
+# Signals record WHY we are contacting someone; evidence records HOW WE KNOW.
+# Both are append-only. There are deliberately no update or delete helpers for
+# evidence: a message we already sent must stay explainable by exactly the
+# facts that were true when we sent it.
+
+
+def create_signal(
+    prospect_id: int,
+    kind: str,
+    confidence: str,
+    dedup_key: str,
+    *,
+    payload: str | None = None,
+    occurred_at: str | None = None,
+    expires_at: str | None = None,
+    status: str = "new",
+) -> int | None:
+    """Insert a signal. Returns the new row id, or None when `dedup_key`
+    collides with an existing signal.
+
+    A collision is the normal, expected outcome of re-scouting somebody we
+    already know about — it means "already detected", not "error". Callers
+    should skip, not raise. Mirrors record_message()'s external_id handling.
+    """
+    if confidence not in VALID_CONFIDENCE:
+        raise ValueError(f"invalid confidence {confidence!r}; expected one of {VALID_CONFIDENCE}")
+    if status not in VALID_SIGNAL_STATUSES:
+        raise ValueError(f"invalid signal status {status!r}; expected one of {VALID_SIGNAL_STATUSES}")
+    with connect() as conn:
+        try:
+            cur = conn.execute(
+                """INSERT INTO signals
+                   (prospect_id, kind, status, confidence, detected_at,
+                    occurred_at, expires_at, payload, dedup_key)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (prospect_id, kind, status, confidence, now(),
+                 occurred_at, expires_at, payload, dedup_key),
+            )
+            return int(cur.lastrowid)
+        except sqlite3.IntegrityError:
+            return None
+
+
+def set_signal_status(signal_id: int, status: str) -> None:
+    """The only mutable field on a signal — its lifecycle position."""
+    if status not in VALID_SIGNAL_STATUSES:
+        raise ValueError(f"invalid signal status {status!r}; expected one of {VALID_SIGNAL_STATUSES}")
+    with connect() as conn:
+        conn.execute("UPDATE signals SET status = ? WHERE id = ?", (status, signal_id))
+
+
+def add_evidence(
+    signal_id: int,
+    claim: str,
+    source_type: str,
+    *,
+    source_url: str | None = None,
+    raw_excerpt: str | None = None,
+    fetched_at: str | None = None,
+) -> int:
+    """Attach one supporting fact to a signal.
+
+    `claim` is a short natural-language assertion ("Started as Founder at Acme
+    in March 2026") because that is the string both the drafter and the
+    grounding check consume. `raw_excerpt` holds the verbatim source text it
+    was derived from; its checksum lets us detect later that the upstream
+    source changed.
+    """
+    checksum = None
+    if raw_excerpt is not None:
+        checksum = hashlib.sha256(raw_excerpt.encode("utf-8")).hexdigest()[:16]
+    with connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO evidence
+               (signal_id, claim, source_type, source_url, raw_excerpt, fetched_at, checksum)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (signal_id, claim, source_type, source_url, raw_excerpt,
+             fetched_at or now(), checksum),
+        )
+        return int(cur.lastrowid)
+
+
+def get_signal(signal_id: int) -> sqlite3.Row | None:
+    with connect() as conn:
+        return conn.execute("SELECT * FROM signals WHERE id = ?", (signal_id,)).fetchone()
+
+
+def get_signal_by_dedup_key(dedup_key: str) -> sqlite3.Row | None:
+    """Used after a create_signal() collision to report which signal already
+    covers the event."""
+    with connect() as conn:
+        return conn.execute(
+            "SELECT * FROM signals WHERE dedup_key = ?", (dedup_key,)
+        ).fetchone()
+
+
+def list_evidence(signal_id: int) -> list[sqlite3.Row]:
+    with connect() as conn:
+        cur = conn.execute(
+            "SELECT * FROM evidence WHERE signal_id = ? ORDER BY id", (signal_id,)
+        )
+        return list(cur.fetchall())
+
+
+def get_signal_with_evidence(signal_id: int) -> tuple[sqlite3.Row, list[sqlite3.Row]] | None:
+    """The audit view: a signal plus everything supporting it. Returns None if
+    the signal does not exist."""
+    signal = get_signal(signal_id)
+    if signal is None:
+        return None
+    return signal, list_evidence(signal_id)
+
+
+def list_signals(
+    kind: str | None = None,
+    status: str | None = None,
+    prospect_id: int | None = None,
+    limit: int = 100,
+) -> list[sqlite3.Row]:
+    clauses, params = [], []
+    if kind:
+        clauses.append("kind = ?")
+        params.append(kind)
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    if prospect_id is not None:
+        clauses.append("prospect_id = ?")
+        params.append(prospect_id)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    with connect() as conn:
+        cur = conn.execute(
+            f"SELECT * FROM signals {where} ORDER BY detected_at DESC LIMIT ?", params
+        )
+        return list(cur.fetchall())

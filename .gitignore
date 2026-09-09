@@ -1,7 +1,19 @@
 .env
 .env.local
+# Any .env variant: setup.sh writes .env.backup-<timestamp> files, and
+# every one of them carries the full credential set.
+.env.*
+!.env.example
 data/*.db
 data/*.db-journal
+# Daemon logs. These carried a live Telegram bot token (embedded in every
+# Telegram API URL) into git history — never track them.
+data/*.log
+*.log
+# Raw Unipile profile responses from scripts/probe_unipile_experience.py.
+# Real people's profile data; this repository is public. Keep bodies local and
+# commit only the values-free schema summary.
+data/probe/
 __pycache__/
 *.pyc
 .venv/

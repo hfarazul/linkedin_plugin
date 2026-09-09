@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import html
 import json
+import logging
+import re
 import textwrap
 from dataclasses import dataclass
 from typing import Any
@@ -19,6 +21,72 @@ from typing import Any
 import httpx
 
 from .config import Config
+
+
+# --- credential redaction in logs -------------------------------------------
+#
+# A Telegram bot token is embedded in every API URL:
+#   https://api.telegram.org/bot<TOKEN>/getUpdates
+# httpx logs request URLs at INFO level, so any process that turns on INFO
+# logging (the bot daemon does, in run()) writes the live token to disk on
+# every poll — roughly every 25 seconds. That is how the token ended up
+# committed to data/bot-daemon.err.log and pushed to a public repository.
+#
+# Silencing httpx entirely would also lose the Unipile request log, which is
+# genuinely useful and carries no secret (Unipile authenticates with a header,
+# not a URL). So instead we redact the token out of log records at the source:
+# logs stay complete, the credential never reaches a file.
+
+_TOKEN_IN_URL_RE = re.compile(r"/bot\d{6,}:[A-Za-z0-9_-]+")
+_REDACTED = "/bot<redacted>"
+
+
+def _redact(value: Any) -> Any:
+    """Redact a bot token from one log argument, preserving non-string args.
+
+    httpx passes the URL as an httpx.URL object, not a str, so we stringify
+    any argument whose text form contains a token and leave everything else
+    (ints, status codes) untouched so %d-style formatting still works."""
+    if isinstance(value, str):
+        return _TOKEN_IN_URL_RE.sub(_REDACTED, value)
+    try:
+        text = str(value)
+    except Exception:
+        return value
+    if _TOKEN_IN_URL_RE.search(text):
+        return _TOKEN_IN_URL_RE.sub(_REDACTED, text)
+    return value
+
+
+class RedactBotToken(logging.Filter):
+    """Strips Telegram bot tokens from log records before they are emitted."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = _TOKEN_IN_URL_RE.sub(_REDACTED, record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(_redact(a) for a in record.args)
+        elif isinstance(record.args, dict):
+            record.args = {k: _redact(v) for k, v in record.args.items()}
+        return True
+
+
+# Loggers that can carry a Telegram API URL. httpcore is included because it
+# logs connection-level detail that can include the request target.
+_REDACTED_LOGGERS = ("httpx", "httpcore", "linkedin.bot")
+_redaction_installed = False
+
+
+def install_log_redaction() -> None:
+    """Attach the token-redaction filter. Idempotent, so it is safe to call
+    from every TelegramClient construction and from the daemon entry point."""
+    global _redaction_installed
+    if _redaction_installed:
+        return
+    log_filter = RedactBotToken()
+    for name in _REDACTED_LOGGERS:
+        logging.getLogger(name).addFilter(log_filter)
+    _redaction_installed = True
 
 
 def _h(text: str | None) -> str:
@@ -37,6 +105,7 @@ KIND_LABELS = {
     "dm2":          "DM #2 (4-day follow-up)",
     "dm3":          "DM #3 (breakup)",
     "reply":        "Reply",
+    "email1":       "Email #1",
 }
 
 
@@ -50,6 +119,7 @@ class TelegramClient:
             raise TelegramError(
                 "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set in .env"
             )
+        install_log_redaction()
         self.cfg = cfg
         self._client = httpx.Client(
             base_url=f"https://api.telegram.org/bot{cfg.telegram_bot_token}",

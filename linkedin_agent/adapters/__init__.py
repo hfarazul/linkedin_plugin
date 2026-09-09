@@ -3,16 +3,26 @@ from ..config import Config
 
 
 def get_adapter(cfg: Config) -> LinkedInAdapter:
-    if cfg.backend == "playwright":
-        from .playwright_adapter import PlaywrightAdapter
-        return PlaywrightAdapter(cfg)
-    if cfg.backend == "unipile":
-        from .unipile_adapter import UnipileAdapter
-        return UnipileAdapter(cfg)
+    """Return the adapter for the configured backend.
+
+    'unipile' and 'phantombuster' both resolve to the capability router, which
+    is now the only production path — provider choice is a routing question,
+    not an adapter question, so the legacy backend name is honoured but does
+    not select an implementation. 'fake' and 'playwright' still bypass it:
+    the fake adapter is what keeps the offline test suite hermetic.
+    """
     if cfg.backend == "fake":
         from .fake_adapter import FakeAdapter
         return FakeAdapter(cfg)
-    raise ValueError(f"unknown backend {cfg.backend!r}; expected 'playwright', 'unipile', or 'fake'")
+    if cfg.backend == "playwright":
+        from .playwright_adapter import PlaywrightAdapter
+        return PlaywrightAdapter(cfg)
+    if cfg.backend in ("unipile", "phantombuster", "router"):
+        from ..providers import RouterAdapter, build_router
+        return RouterAdapter(build_router(cfg))
+    raise ValueError(
+        f"unknown backend {cfg.backend!r}; expected 'phantombuster', 'fake', "
+        f"or 'playwright'")
 
 
 __all__ = ["LinkedInAdapter", "ProspectHit", "Post", "get_adapter"]

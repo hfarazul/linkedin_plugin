@@ -13,6 +13,28 @@ from .adapters import get_adapter
 from .config import load as load_config
 from .telegram import TelegramClient, TelegramError
 
+# Windows consoles default to a legacy code page (cp1252), which cannot encode
+# the ✓/⚠/emoji characters rich prints — every command that emits one dies with
+# UnicodeEncodeError, including inside the test suite's CLI subprocesses.
+# Force UTF-8 on the streams before rich captures them. No-op on POSIX, where
+# stdout is already UTF-8.
+if sys.platform == "win32":
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            if _stream.isatty():
+                # A real console: switch to UTF-8 so the glyphs render.
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+            else:
+                # Piped or captured. Keep the locale encoding the reader on the
+                # other end expects — forcing UTF-8 here just moves the crash
+                # into their decoder — and only stop it raising on characters
+                # cp1252 can't represent.
+                _stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError, OSError):
+            # Wrapped in something without reconfigure(). Leave it alone rather
+            # than failing at import time.
+            pass
+
 console = Console()
 
 
@@ -281,6 +303,11 @@ def connect(prospect_id: int, note: str | None) -> None:
         result = adapter.send_connection(p["linkedin_url"], note=note)
         db.log_action(prospect_id, "connect", json.dumps({"note": note}), result, False)
         db.set_status(prospect_id, "connection_sent")
+        if note:
+            # Same reason as the daemon's connect path: an unrecorded connect
+            # note leaves the prospect with no outbound message, which breaks
+            # reply detection and hides the first turn from the drafter.
+            db.record_message(prospect_id, "outbound", note)
         safety.human_delay(cfg)
         console.print(f"[green]✓[/green] connection request sent to {p['full_name'] or p['linkedin_url']}")
     finally:
@@ -292,6 +319,8 @@ def connect(prospect_id: int, note: str | None) -> None:
 @click.argument("body")
 def dm(prospect_id: int, body: str) -> None:
     """Send a direct message (must already be connected)."""
+    from .bot_daemon import log_unconfirmed
+    from .providers.router_adapter import is_unconfirmed
     cfg, adapter = _adapter()
     try:
         safety.check_cap(cfg, "dm")
@@ -306,12 +335,25 @@ def dm(prospect_id: int, body: str) -> None:
         result = adapter.send_dm(p["linkedin_url"], body)
         db.log_action(prospect_id, "dm", body[:200], result, False)
         db.record_message(prospect_id, "outbound", body)
-        # Bump dm_count + last_dm_at so follow-up scheduler picks this up at
-        # the right cadence — same as the bot daemon's approval-send path.
-        db.record_dm(prospect_id)
+        # Bump dm_count + last_dm_at so the follow-up scheduler picks this up
+        # at the right cadence — same as the bot daemon's approval-send path,
+        # including its treatment of a send the provider could not confirm.
+        # This is the path CLAUDE.md documents for recrafted replies, so it is
+        # reached by hand on exactly the nuanced cases.
+        unconfirmed = is_unconfirmed(result)
+        db.record_dm(prospect_id, confirmed=not unconfirmed)
         db.set_status(prospect_id, "dm_sent")
+        if unconfirmed:
+            log_unconfirmed(prospect_id, "dm", "cli")
         safety.human_delay(cfg)
-        console.print(f"[green]✓[/green] DM sent to {p['full_name'] or p['linkedin_url']}")
+        if unconfirmed:
+            console.print(
+                f"[yellow]?[/yellow] DM dispatched to "
+                f"{p['full_name'] or p['linkedin_url']}, but the provider "
+                f"could not confirm delivery — follow-ups are parked. "
+                f"Check LinkedIn.")
+        else:
+            console.print(f"[green]✓[/green] DM sent to {p['full_name'] or p['linkedin_url']}")
     finally:
         adapter.close()
 
@@ -397,6 +439,18 @@ def status() -> None:
         elif is_dm2_due(p, now):
             due_followups.append((p["full_name"], "DM2"))
 
+    # --- Sends the provider could not confirm -------------------------------
+    # These deliberately never come due as follow-ups, so without a line here
+    # they would sit in `dm_sent` indefinitely and look like nothing needed
+    # doing. Parked is meant to be visible, not quiet.
+    with db.connect() as conn:
+        unconfirmed = list(conn.execute(
+            """SELECT a.prospect_id, p.full_name, a.payload, a.created_at
+                 FROM actions a JOIN prospects p ON p.id = a.prospect_id
+                WHERE a.kind = 'send_unconfirmed'
+                  AND p.status != 'replied'
+             ORDER BY a.created_at DESC LIMIT 10"""))
+
     # --- Render -------------------------------------------------------------
     console.print()
     console.print(f"  [bold]Caps today[/bold]    {caps_line}")
@@ -434,7 +488,154 @@ def status() -> None:
         for name, kind in due_followups[:5]:
             console.print(f"    • {name} ({kind})")
 
+    if unconfirmed:
+        console.print()
+        console.print(f"[bold yellow]❓ {len(unconfirmed)} send(s) the provider "
+                      f"could not confirm[/bold yellow]")
+        console.print("[dim]   pipeline advanced so nothing sends twice; "
+                      "follow-ups are parked until you check LinkedIn[/dim]")
+        for row in unconfirmed[:5]:
+            who = row["full_name"] or f"prospect {row['prospect_id']}"
+            try:
+                kind = json.loads(row["payload"] or "{}").get("kind", "?")
+            except (ValueError, TypeError):
+                kind = "?"
+            console.print(f"    • {who} ({kind}) — {(row['created_at'] or '')[:16]}")
+
     console.print()
+
+
+@cli.command()
+@click.option("--collect", is_flag=True, help="Poll running jobs and apply finished results.")
+@click.option("--status", "status_filter", default=None,
+              help="Filter the listing: running / finished / failed / timeout.")
+@click.option("--limit", default=20, type=int)
+def jobs(collect: bool, status_filter: str | None, limit: int) -> None:
+    """Provider work that runs asynchronously.
+
+    PhantomBuster boots a browser per call, so work is submitted on one cron
+    tick and collected on a later one rather than blocking the cycle. Run with
+    --collect from cron; without it, this just lists what is outstanding.
+    """
+    from . import research_jobs
+    cfg = load_config()
+    db.init_db()
+
+    if collect:
+        result = research_jobs.collect(cfg)
+        console.print(f"[green]✓[/green] {result.summary()}")
+        for err in result.errors[:5]:
+            console.print(f"  [red]✗[/red] {err}")
+        console.print()
+
+    rows = db.list_jobs(status=status_filter, limit=limit)
+    if not rows:
+        console.print("[dim]no jobs[/dim]")
+        return
+    t = Table(title=f"Research jobs ({len(rows)})")
+    for col in ("id", "capability", "provider", "prospect", "status", "submitted", "detail"):
+        t.add_column(col)
+    colours = {"running": "yellow", "finished": "green",
+               "failed": "red", "timeout": "red"}
+    for r in rows:
+        colour = colours.get(r["status"], "white")
+        t.add_row(
+            str(r["id"]), r["capability"], r["provider"],
+            str(r["prospect_id"] or "—"),
+            f"[{colour}]{r['status']}[/{colour}]",
+            (r["submitted_at"] or "")[:16],
+            (r["result_summary"] or r["error"] or "—")[:40],
+        )
+    console.print(t)
+
+
+@cli.command()
+def providers() -> None:
+    """Show which provider owns each LinkedIn capability.
+
+    Routing is per capability, so 'which provider are we on' has no single
+    answer — this is the authoritative view. Capabilities showing NONE are
+    unroutable: either no provider supports them, or the one that does is
+    missing credentials or an agent id.
+    """
+    import os
+    from .providers import Capability, build_router, is_write
+
+    cfg = load_config()
+    primary = os.getenv("LINKEDIN_PRIMARY_PROVIDER", "phantombuster")
+    fallback = os.getenv("LINKEDIN_FALLBACK_PROVIDER") or None
+    console.print()
+    console.print(f"  [bold]primary[/bold]   {primary}")
+    console.print(f"  [bold]fallback[/bold]  {fallback or '(none)'}")
+    console.print()
+
+    try:
+        router = build_router(cfg, primary=primary, fallback=fallback)
+    except Exception as e:
+        console.print(f"[red]could not build router: {e}[/red]")
+        sys.exit(1)
+
+    try:
+        t = Table(show_header=True, header_style="bold")
+        for col in ("capability", "kind", "owner", "evidence"):
+            t.add_column(col)
+        chain = {c: router.providers_for(c) for c in Capability}
+        # A capability can be unroutable for two different reasons, and the
+        # fixes are opposite: nothing is configured, or it is configured and
+        # deliberately disarmed pending verification. Reporting both as NONE
+        # sends someone hunting for a missing agent id that is already set.
+        disarmed = []
+        for candidate in (router.primary, router.fallback):
+            if candidate is None or not hasattr(candidate, "requires_opt_in"):
+                continue
+            disarmed += [c for c in Capability
+                         if not candidate.supports(c)
+                         and candidate.requires_opt_in(c)
+                         and getattr(candidate, "_agent_id", lambda _c: None)(c)]
+        for cap in Capability:
+            owner = router.owner_of(cap)
+            kind = "write" if is_write(cap) else "read"
+            if owner is None and cap in disarmed:
+                shown = "[yellow]DISARMED[/yellow]"
+            elif owner is None:
+                shown = "[red]NONE[/red]"
+            elif owner == primary:
+                shown = f"[green]{owner}[/green]"
+            else:
+                shown = f"[yellow]{owner}[/yellow] (fallback)"
+            # Whether a capability rests on output we have actually inspected
+            # matters more now that there is no fallback to route around it.
+            evidence = "—"
+            providers_for_cap = chain[cap]
+            if providers_for_cap and hasattr(providers_for_cap[0], "verification"):
+                level = providers_for_cap[0].verification(cap)
+                evidence = {
+                    "verified": "[green]verified[/green]",
+                    "unverified": "[yellow]UNVERIFIED[/yellow]",
+                    "unsupported": "[red]no equivalent[/red]",
+                }.get(level, level)
+            t.add_row(cap.value, kind, shown, evidence)
+        console.print(t)
+        unrouted = [c.value for c in Capability
+                    if router.owner_of(c) is None and c not in disarmed]
+        if unrouted:
+            console.print()
+            console.print(f"[yellow]unroutable:[/yellow] {', '.join(unrouted)}")
+            console.print("[dim]no provider supports these, or credentials / "
+                          "agent ids are missing[/dim]")
+        if disarmed:
+            console.print()
+            console.print(f"[yellow]disarmed:[/yellow] "
+                          f"{', '.join(c.value for c in disarmed)}")
+            console.print("[dim]agent configured, but the Phantom's output has "
+                          "never been inspected. These writes reach real "
+                          "people, so enable one only after its verification "
+                          "task passes:[/dim]")
+            console.print(f"[dim]  PHANTOMBUSTER_ENABLE_UNVERIFIED="
+                          f"{','.join(c.value for c in disarmed)}[/dim]")
+        console.print()
+    finally:
+        router.close()
 
 
 @cli.command()

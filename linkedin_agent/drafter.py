@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Sequence
 
 from . import campaigns as campaigns_mod
+from . import evidence as evidence_mod
 from . import db
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -39,6 +40,10 @@ KIND_MAX_CHARS = {
     # right reply is often shorter than an initiation — just enough to answer
     # the inbound and pose the next move. 600 cap, 400 sweet spot.
     "reply": 600,
+    # Email has more room than a LinkedIn DM but is not a newsletter. The cap
+    # is generous enough for a hook, positioning and a CTA without inviting a
+    # wall of text that reads as a template.
+    "email1": 1200,
 }
 
 # Minimum length per kind — anything shorter is almost always a degenerate
@@ -53,6 +58,7 @@ KIND_MIN_CHARS = {
     # one-word ack is almost always wrong on first reply. 80 keeps room for
     # acknowledge + content + sign-off.
     "reply": 80,
+    "email1": 250,
 }
 
 # Auto-retry budget. The drafter is stochastic — a fresh `claude -p` call
@@ -87,10 +93,181 @@ SPAM_TELLS = (
 
 def _contains_spam_tell(body: str) -> str | None:
     """Return the matched spam-tell phrase, or None if clean."""
-    low = body.lower()
+    # Typographic apostrophes first: a model writes "I'd love to connect" with
+    # U+2019, and every entry here is written with an ASCII quote. Without this
+    # the phrase matches nothing and goes out.
+    low = _normalise_quotes(body.lower())
     for phrase in SPAM_TELLS:
         if phrase in low:
             return phrase
+    return None
+
+
+# Details that reveal the message was assembled from a scraped profile rather
+# than written by someone who noticed something. A prospect should feel read
+# about, not surveilled.
+#
+# "the move to a new stealth venture" reads as human attention.
+# "started February 2026" reads as a database row, because it is one — and it
+# invites the obvious question of where we got it.
+_SURVEILLANCE_TELLS = (
+    # ISO or slashed dates: 2026-02, 2026/02, 02/2026
+    re.compile(r"\b(19|20)\d{2}[-/]\d{1,2}\b"),
+    re.compile(r"\b\d{1,2}[-/](19|20)\d{2}\b"),
+    # "in March 2026", "since Feb 2026" — a month-year stamp next to a verb
+    # that only makes sense if we looked it up.
+    re.compile(r"(?i)\b(?:since|in|from|started|joined|as of)\s+"
+               r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+"
+               r"(?:19|20)\d{2}\b"),
+    # Headcount straight off a company page.
+    re.compile(r"(?i)\b\d{1,6}\s*(?:\+\s*)?employees\b"),
+    re.compile(r"(?i)\b(?:employee count|headcount) of \d+"),
+)
+
+
+# Phrasings that assert the prospect has a business problem. Matched only when
+# no SIGNAL licenses such a claim -- see linkedin_agent/evidence.py. A verified
+# career move is not evidence of a tooling problem, and the old email asserted
+# one anyway, to a real person, at their real address.
+#
+# When a claim IS licensed these are allowed through, and whether the claim
+# stays tied to the signal that licensed it is enforced by the prompt, not
+# here. A regex cannot check relevance; it can check that we are not
+# diagnosing strangers.
+_PAIN_CLAIM_PATTERNS = (
+    re.compile(r"(?i)\byou(?:'re| are) (?:probably|likely|no doubt|almost "
+               r"certainly)\b"),
+    re.compile(r"(?i)\b(?:most|many) (?:teams|founders|companies|operators) "
+               r"(?:at|in) (?:that|this|your)\b"),
+    re.compile(r"(?i)\bteams? (?:building|operating|scaling) at (?:that|this) "
+               r"(?:stage|point)\b"),
+    re.compile(r"(?i)\bend up (?:rebuilding|building|doing|wiring|stitching)\b"),
+    re.compile(r"(?i)\bthe real (?:squeeze|bottleneck|constraint|pain)\b"),
+    re.compile(r"(?i)\b(?:struggling|wrestling|grappling) with\b"),
+    re.compile(r"(?i)\bdrowning in\b"),
+    re.compile(r"(?i)\byour (?:bottleneck|technical debt|tooling problem)\b"),
+    re.compile(r"(?i)\bwithout hiring a (?:team|dev team)\b"),
+)
+
+
+def _contains_unsupported_pain_claim(body: str) -> str | None:
+    """Return the phrase asserting an unevidenced problem, or None if clean."""
+    body = _normalise_quotes(body)
+    for pattern in _PAIN_CLAIM_PATTERNS:
+        match = pattern.search(body)
+        if match:
+            return match.group(0)
+    return None
+
+
+# The softer move the drafter makes when it has nothing: instead of asserting
+# a problem outright, it argues that the prospect's *category* is one where our
+# work matters. From the first live run, for a prospect we knew one fact about:
+#
+#     "Multi-property, multi-country operations is a setting where that work
+#      tends to matter"
+#
+# That is the same invention wearing a hedge. It reads as insight and contains
+# none — we did not know it, we reasoned it from his job title, and reasoning
+# a pain from a job title is the conversion this system exists to block.
+#
+# Applied only at the weak and none tiers. At moderate the prospect has given
+# us something to react to and a cautious relevance argument is legitimate; at
+# strong it is the point.
+_INFERRED_RELEVANCE_PATTERNS = (
+    re.compile(r"(?i)\bis (?:a|an|the) (?:setting|environment|context|world|"
+               r"space|place) where\b"),
+    re.compile(r"(?i)\btends to (?:matter|be|come up|bite|get|show up)\b"),
+    re.compile(r"(?i)\b(?:usually|often|typically) (?:matters|comes up|where)\b"),
+    re.compile(r"(?i)\bwhere that (?:kind of )?work (?:tends|usually|often|"
+               r"matters)\b"),
+    re.compile(r"(?i)\bthat(?:'s| is) (?:usually|often|typically) (?:where|when)\b"),
+    re.compile(r"(?i)\bin (?:my|our) experience,? (?:teams|companies|operators)\b"),
+)
+
+
+# Dashes used as connective tissue. Not banned: people use them, and a rule
+# that forbids them outright produces prose that reads artificially
+# constrained, which is the same tell from the other direction.
+#
+# The problem is density and sameness. Across five real drafts the em dash
+# appeared in nearly every sentence that joined an observation to an
+# explanation, always the same construction, and combined with balanced
+# clauses and careful hedging it produced an unmistakable copywriter texture.
+# One is fine. Three is a fingerprint.
+_DASH_CONNECTORS = ("—", "–", " - ")
+
+MAX_CONNECTOR_DASHES = 1
+
+
+def count_connector_dashes(body: str) -> int:
+    return sum(body.count(d) for d in _DASH_CONNECTORS)
+
+
+def _overuses_dashes(body: str) -> str | None:
+    """Return a description when dashes are doing too much of the joining."""
+    n = count_connector_dashes(body)
+    if n > MAX_CONNECTOR_DASHES:
+        return f"{n} dashes (soft limit {MAX_CONNECTOR_DASHES})"
+    return None
+
+
+def _contains_inferred_relevance(body: str) -> str | None:
+    """Return the reasoned-from-nothing relevance claim, or None if clean."""
+    body = _normalise_quotes(body)
+    for pattern in _INFERRED_RELEVANCE_PATTERNS:
+        match = pattern.search(body)
+        if match:
+            return match.group(0)
+    return None
+
+
+# Phrasings from the previous template. These are banned as *strings*, not as
+# concepts: a prospect who publicly said they are rebuilding their data
+# pipeline can still be told we build data pipelines. What cannot survive is
+# the reusable scaffolding that made every email the same email with the nouns
+# swapped.
+_FILLER_TELLS = (
+    "what caught my eye is the work you are doing",
+    "teams building at that stage",
+    "internal tooling and data pipelines",
+    "take that load off",
+    "tailored to how your company actually works",
+    "that's our outside read",
+    "thats our outside read",
+    "our outside read",
+    "go-to-market ops or product velocity",
+    "somewhere we haven't surfaced",
+    "somewhere we havent surfaced",
+    "shipping without hiring a team",
+    "walk through what we'd build",
+    "walk through what wed build",
+)
+
+
+_normalise_quotes = evidence_mod.normalise_quotes
+
+
+def _contains_filler(body: str) -> str | None:
+    """Return the recycled template phrase, or None if clean."""
+    low = _normalise_quotes(body.lower())
+    for phrase in _FILLER_TELLS:
+        if phrase in low:
+            return phrase
+    return None
+
+
+def _contains_surveillance_tell(body: str) -> str | None:
+    """Return the matched scraped-detail phrase, or None if clean.
+
+    Applied to email only. A LinkedIn DM sits inside LinkedIn, where seeing
+    someone's profile is the medium; a cold email arriving with their start
+    date in it is a different and worse experience.
+    """
+    for pattern in _SURVEILLANCE_TELLS:
+        match = pattern.search(body)
+        if match:
+            return match.group(0)
     return None
 
 
@@ -101,6 +278,12 @@ class DrafterInput:
     prospect: dict
     recent_posts: list[dict] = field(default_factory=list)
     prior_messages: list[dict] = field(default_factory=list)
+    # Typed evidence from linkedin_agent.evidence. When present it, not the
+    # raw profile fields, is what the drafter is told to write from: the
+    # prospect dict is a bag of strings with no indication of which ones
+    # license a claim, and handing a model such a bag is how "changed jobs"
+    # became "has a tooling problem".
+    evidence: dict | None = None
 
 
 # -------------------------------------------------------------- prompt loading
@@ -127,6 +310,7 @@ def build_input(
     kind: str,
     prospect_id: int,
     recent_posts: Sequence[dict] | None = None,
+    evidence: dict | None = None,
 ) -> DrafterInput:
     """Assemble the JSON payload the drafter prompt expects.
     The caller passes recent_posts because that comes from the adapter, not the DB."""
@@ -183,6 +367,7 @@ def build_input(
         },
         recent_posts=list(recent_posts or []),
         prior_messages=prior,
+        evidence=evidence,
     )
 
 
@@ -194,6 +379,63 @@ def render_prompt(inp: DrafterInput, retry_hint: str | None = None) -> str:
     base = _load_subagent_prompt()
     payload = json.dumps(asdict(inp), indent=2, ensure_ascii=False)
     closing = "Draft now. Return only the message body."
+    if inp.evidence:
+        # Restated outside the JSON because it is the binding constraint, and
+        # a rule buried in a payload field competes with everything else in
+        # the payload for the model's attention.
+        licensed = inp.evidence.get("pain_claim_licensed")
+        close = inp.evidence.get("closing")
+        if close:
+            uncertainty = (
+                "You may name your uncertainty ONCE, briefly."
+                if close.get("names_uncertainty") else
+                "Do NOT write a sentence saying you don't know whether this "
+                "is relevant. The question carries it."
+            )
+            samples = "\n".join(f"  - {e}" for e in close.get("examples", []))
+            closing = (
+                f"HOW TO CLOSE — {close['name']}\n"
+                f"Purpose: {close['purpose']} {uncertainty}\n"
+                f"Sentences that hit this intent:\n{samples}\n"
+                f"Do not copy any of them. They triangulate the target; write "
+                f"your own sentence that lands in the same place.\n\n{closing}"
+            )
+        angle = inp.evidence.get("positioning")
+        if angle:
+            domain = angle.get("proof_domain")
+            closing = (
+                f"HOW TO INTRODUCE CORTIVO — {angle['name']}\n"
+                f"Angle: {angle['angle']}\n"
+                f"Chosen because: {angle['fits_because']}.\n"
+                + (f"Their world resembles ours in: {domain}. Name the "
+                   f"matching proof point from the brief.\n" if domain and
+                   angle["name"] == "proof_point" else "")
+                + "Across 25 drafts, 23 called us \"a small AI-engineering "
+                  "studio\" while the brief's actual work went unmentioned. "
+                  "Twelve different sentences, one identical claim. Use THIS "
+                  "angle instead, in your own words, and do not fall back on "
+                  "the generic self-description.\n\n" + closing
+            )
+        shape = inp.evidence.get("shape")
+        if shape:
+            closing = (
+                f"SHAPE FOR THIS EMAIL — {shape['name']}: {shape['outline']}\n\n"
+                f"Follow it. Left alone you settle into one order for every "
+                f"prospect, and across a hundred sends that order is the "
+                f"tell.\n\n{closing}"
+            )
+        closing = (
+            f"Evidence tier for this prospect: "
+            f"{inp.evidence.get('tier')}. "
+            + ("A signal supports a claim about their situation; keep the "
+               "claim tied to that signal and phrase it as a read, not a "
+               "diagnosis."
+               if licensed else
+               "NOTHING licenses a claim about this person's problems. Do "
+               "not state, imply, or hedge one. Reference what is verified, "
+               "introduce Cortivo plainly, ask whether it is relevant.")
+            + f"\n\n{closing}"
+        )
     if retry_hint:
         closing = f"{retry_hint}\n\n{closing}"
     return f"{base}\n\n# Context\n\n```json\n{payload}\n```\n\n{closing}"
@@ -215,6 +457,14 @@ def _invoke_claude(prompt: str, timeout: int = 90) -> str:
         [claude_bin, "-p", prompt, "--output-format", "text"],
         capture_output=True,
         text=True,
+        # The model emits UTF-8. Without this, text=True decodes with the
+        # locale codec — cp1252 on Windows — and the first live drafter run
+        # produced "Vincent â€”" where an em-dash should be. That corruption
+        # is in the draft body itself, not the terminal: it would be stored,
+        # approved on a phone, and mailed to a real person. Names with
+        # accents corrupt the same way.
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
         check=False,
         stdin=subprocess.DEVNULL,
@@ -281,11 +531,97 @@ def _clean_output(raw: str) -> str:
 
 # -------------------------------------------------------------- public API
 
+@dataclass
+class DraftAttempt:
+    """What happened on one pass through the drafter.
+
+    Carries the verdict and never the draft. A rejected body is assembled from
+    a real person's scraped profile, and the trace it would land in is
+    diagnostic output that gets pasted into tickets and chat. The category and
+    reason say everything an operator needs — which gate fired and why — with
+    nothing about the prospect in them.
+    """
+
+    number: int
+    outcome: str                 # "accepted" | "rejected"
+    category: str | None = None  # the gate that fired, machine-readable
+    reason: str | None = None    # short human explanation, no draft content
+
+    def __str__(self) -> str:
+        if self.outcome == "accepted":
+            return f"attempt {self.number}: accepted"
+        return f"attempt {self.number}: rejected — {self.category}: {self.reason}"
+
+
+def _record(sink, number: int, outcome: str,
+            category: str | None = None, reason: str | None = None) -> None:
+    """Append an attempt to the caller's list, if it asked for one."""
+    if sink is None:
+        return
+    sink.append(DraftAttempt(number=number, outcome=outcome,
+                             category=category, reason=reason))
+
+
+def shape_gaps(body: str, evidence: dict, brief: str) -> list[str]:
+    """Which of the chosen shape's parts the draft failed to deliver."""
+    shape_name = (evidence.get("shape") or {}).get("name")
+    if not shape_name:
+        return []
+    for shape in evidence_mod._SHAPES:
+        if shape.name != shape_name:
+            continue
+        # The bundle is already flattened into `evidence` by this point, so a
+        # light stand-in carries the one field the checks read.
+        bundle = evidence_mod.EvidenceBundle(items=[
+            evidence_mod.Evidence(kind=evidence_mod.EvidenceKind.OBSERVATION,
+                                  statement="", source="",
+                                  detail=o.get("detail", ""))
+            for o in evidence.get("observations", [])])
+        return evidence_mod.missing_shape_elements(body, shape, bundle, brief)
+    return []
+
+
+def _shared_positioning() -> str:
+    """The shared Cortivo brief, which holds the facts about us.
+
+    Read rather than imported so an edit to the brief takes effect on the next
+    draft — the brief is the authority on what we may claim, and a stale copy
+    would authorise yesterday's facts.
+    """
+    try:
+        return campaigns_mod.brief_path_for("_cortivo").read_text(
+            encoding="utf-8", errors="replace")
+    except (OSError, AttributeError):
+        # No brief means nothing is grounded, so every specific claim about us
+        # is rejected. That is the right way to fail: silence beats invention.
+        return ""
+
+
+_SUBJECT_RE = re.compile(r"^\s*subject\s*:\s*(.+?)\s*\n+", re.IGNORECASE)
+
+
+def parse_email(text: str) -> tuple[str | None, str]:
+    """Split "Subject: ...\\n\\n<body>" into its two parts.
+
+    The subject is generated by the drafter rather than assembled from a
+    format string, because a fixed "<Company> - <benefit>" structure is a
+    marketing subject line and reads like one on every prospect. A missing
+    subject returns None rather than a fabricated one, so the caller decides
+    what to do instead of silently sending a template.
+    """
+    match = _SUBJECT_RE.match(text)
+    if not match:
+        return None, text.strip()
+    return match.group(1).strip(), text[match.end():].strip()
+
+
 def draft(
     kind: str,
     prospect_id: int,
     recent_posts: Sequence[dict] | None = None,
     max_attempts: int = MAX_DRAFT_ATTEMPTS,
+    evidence: dict | None = None,
+    attempts_out: list | None = None,
 ) -> str:
     """Generate a draft, retrying on recoverable failures (oversize / empty /
     suspiciously short). Raises DrafterError when:
@@ -293,9 +629,36 @@ def draft(
       - All `max_attempts` runs failed quality checks
       - Build fails (missing prospect, invalid kind, etc.)
     """
-    inp = build_input(kind, prospect_id, recent_posts=recent_posts)
+    inp = build_input(kind, prospect_id, recent_posts=recent_posts,
+                      evidence=evidence)
     cap_max = KIND_MAX_CHARS[kind]
     cap_min = KIND_MIN_CHARS.get(kind, 50)
+
+    # Whether this prospect's evidence licenses ANY claim about their problems.
+    # Absent evidence the answer is no for email, which is the fail-closed
+    # direction: an email that diagnoses a stranger with no basis is the
+    # failure being fixed, and silently permitting it whenever the caller
+    # forgot to pass evidence would reintroduce it. DM kinds keep their
+    # existing behaviour unless evidence is supplied, so the live LinkedIn
+    # flow is not changed underneath itself.
+    if evidence is not None:
+        pain_licensed = bool(evidence.get("pain_claim_licensed"))
+        enforce_pain_gate = True
+    else:
+        pain_licensed = False
+        enforce_pain_gate = kind.startswith("email")
+
+    # At the weak tier the correct email is: the verified observation, a plain
+    # introduction, an ask. Arguing that the prospect's category makes us
+    # relevant is what the drafter reaches for instead of admitting it knows
+    # one thing, and it is invention with a hedge on it.
+    thin_evidence = (evidence or {}).get("tier") in ("weak", "none")
+
+    # Claims about us are grounded in the brief, not in anything about the
+    # prospect. Both briefs: the campaign's own, and the shared positioning
+    # file that holds the team, clients and engagement facts.
+    grounding = evidence_mod.CortivoGrounding(
+        (inp.campaign or {}).get("brief") or "", _shared_positioning())
 
     last_failure: str | None = None
     last_body_preview: str | None = None
@@ -309,9 +672,22 @@ def draft(
         # INSUFFICIENT_CONTEXT is terminal — the drafter is telling us there
         # genuinely isn't enough signal. Retrying just wastes tokens.
         if body.strip() == INSUFFICIENT:
+            _record(attempts_out, attempt, "rejected",
+                    "insufficient_context",
+                    "the drafter judged the evidence too thin")
             raise DrafterError("INSUFFICIENT_CONTEXT — not enough signal to draft")
 
+        # Length applies to the message, not to the subject line the drafter
+        # emits above it. Measuring the raw output let a 292-char body pass a
+        # 300-char floor because "Subject: your SDET and AI security roles"
+        # made up the difference — the gate and the validation stage were
+        # measuring two different strings. Content gates below still see the
+        # subject, because a subject can carry a spam tell or a stock phrase.
+        measured = parse_email(body)[1] if kind.startswith("email") else body
+
         if not body:
+            _record(attempts_out, attempt, "rejected", "empty_output",
+                    "the model returned nothing")
             last_failure = f"empty output (attempt {attempt})"
             retry_hint = (
                 "Your previous attempt returned an empty response. "
@@ -319,21 +695,25 @@ def draft(
             )
             continue
 
-        if len(body) > cap_max:
-            last_failure = f"oversize {len(body)}/{cap_max} (attempt {attempt})"
+        if len(measured) > cap_max:
+            _record(attempts_out, attempt, "rejected", "length_over",
+                    f"{len(measured)} chars, cap {cap_max}")
+            last_failure = f"oversize {len(measured)}/{cap_max} (attempt {attempt})"
             last_body_preview = body[:180]
             retry_hint = (
-                f"Your previous attempt was {len(body)} characters; the cap for "
+                f"Your previous attempt was {len(measured)} characters; the cap for "
                 f"`{kind}` is {cap_max}. Be tighter. Cut the second sentence "
                 f"if you have to. Keep only the most specific reference."
             )
             continue
 
-        if len(body) < cap_min:
-            last_failure = f"too short {len(body)}/{cap_min} (attempt {attempt})"
+        if len(measured) < cap_min:
+            _record(attempts_out, attempt, "rejected", "length_under",
+                    f"{len(measured)} chars, floor {cap_min}")
+            last_failure = f"too short {len(measured)}/{cap_min} (attempt {attempt})"
             last_body_preview = body
             retry_hint = (
-                f"Your previous attempt was only {len(body)} characters, which "
+                f"Your previous attempt was only {len(measured)} characters, which "
                 f"is below the {cap_min}-char minimum for a substantive "
                 f"`{kind}`. Add a specific reference from the prospect's post "
                 f"or profile and a real question. Do not return a single line."
@@ -345,6 +725,8 @@ def draft(
         # retry with a specific call-out.
         spam = _contains_spam_tell(body)
         if spam:
+            _record(attempts_out, attempt, "rejected", "spam_tell",
+                    f"{spam!r}")
             last_failure = f"spam tell {spam!r} (attempt {attempt})"
             last_body_preview = body
             retry_hint = (
@@ -356,7 +738,146 @@ def draft(
             )
             continue
 
-        # All quality gates passed.
+        # Recycled-template scan. These phrasings were mandated by the old
+        # prompt and appeared verbatim in every email, which is what made
+        # "personalised" output read as a mail merge.
+        filler = _contains_filler(body)
+        if filler:
+            _record(attempts_out, attempt, "rejected", "template_filler",
+                    f"{filler!r}")
+            last_failure = f"template filler {filler!r} (attempt {attempt})"
+            last_body_preview = body
+            retry_hint = (
+                f"Your previous attempt reused the stock phrase {filler!r}. "
+                f"That phrasing appeared in every email this system has ever "
+                f"produced, which is precisely why it reads as a template. "
+                f"Say the same thing in words that only make sense for this "
+                f"person, or cut the sentence entirely."
+            )
+            continue
+
+        # Unsupported-diagnosis scan. A claim about the prospect's problems
+        # requires a SIGNAL that they themselves published; a job change, a
+        # job title and a headcount are not evidence of anything.
+        if enforce_pain_gate and not pain_licensed:
+            claim = _contains_unsupported_pain_claim(body)
+            if claim:
+                _record(attempts_out, attempt, "rejected", "unsupported_pain_claim",
+                        f"{claim!r} with no signal licensing it")
+                last_failure = f"unsupported pain claim {claim!r} (attempt {attempt})"
+                last_body_preview = body
+                retry_hint = (
+                    f"Your previous attempt asserted a business problem "
+                    f"({claim!r}) that nothing in the evidence supports. "
+                    f"There is no signal that this person has a build, "
+                    f"tooling or scaling problem — do not infer one from "
+                    f"their job title, their employer, or the fact that they "
+                    f"changed roles. Reference what is verified, introduce "
+                    f"Cortivo plainly, and ask whether it is relevant. A "
+                    f"short honest email beats a confident wrong one."
+                )
+                continue
+
+        # Reasoned-relevance scan. Only at the thin tiers, where the drafter
+        # has nothing to react to and argues from the prospect's category
+        # instead.
+        if thin_evidence and not pain_licensed:
+            inferred = _contains_inferred_relevance(body)
+            if inferred:
+                _record(attempts_out, attempt, "rejected", "inferred_relevance",
+                        f"{inferred!r} reasoned from their role")
+                last_failure = f"inferred relevance {inferred!r} (attempt {attempt})"
+                last_body_preview = body
+                retry_hint = (
+                    f"Your previous attempt argued that this person's "
+                    f"situation is one where our work matters ({inferred!r}). "
+                    f"You reasoned that from their job title, not from "
+                    f"anything they said. At this evidence level the email is "
+                    f"three things and no more: the one thing we verified, a "
+                    f"plain sentence on what Cortivo does, and the ask. Do "
+                    f"not argue for relevance — ask about it."
+                )
+                continue
+
+        # Claims about US. The brief is the only authority for our team,
+        # clients, results, timelines and how we work.
+        invented = evidence_mod.ungrounded_cortivo_claim(body, grounding)
+        if invented:
+            _record(attempts_out, attempt, "rejected", "ungrounded_cortivo_claim",
+                    str(invented))
+            last_failure = f"ungrounded Cortivo claim {invented!r} (attempt {attempt})"
+            last_body_preview = body
+            retry_hint = (
+                f"Your previous attempt made a claim about Cortivo that the "
+                f"brief does not support: {invented}. Do not describe our "
+                f"week, our process, our clients or our results beyond what "
+                f"the brief states, and do not mirror the prospect's own "
+                f"vocabulary back as something we do. Everything about us "
+                f"must be traceable to the brief."
+            )
+            continue
+
+        # Scraped-detail scan, email only. Inside LinkedIn, having seen
+        # someone's profile is the medium. A cold email that quotes their
+        # start date announces that we pulled a record on them.
+        if kind.startswith("email"):
+            tell = _contains_surveillance_tell(body)
+            if tell:
+                _record(attempts_out, attempt, "rejected", "surveillance_tell",
+                        f"{tell!r}")
+                last_failure = f"surveillance tell {tell!r} (attempt {attempt})"
+                last_body_preview = body
+                retry_hint = (
+                    f"Your previous attempt contained {tell!r} — a detail that "
+                    f"only comes from scraping a profile, so it reads as "
+                    f"surveillance rather than attention. Remove every date, "
+                    f"month-year stamp and employee count. Describe the move "
+                    f"in narrative terms instead: what they built at the "
+                    f"previous company, and what they are doing now."
+                )
+                continue
+
+        # ---- soft gates -------------------------------------------------
+        # Style, not truth. These re-prompt while there is budget left, but
+        # never destroy a draft: an email with two dashes in it is worse than
+        # one with one, and far better than no email at all. A correctness
+        # gate above would rather send nothing; this one would not.
+        soft = _overuses_dashes(body)
+        soft_category = "dash_overuse"
+        if not soft and inp.evidence and inp.evidence.get("shape"):
+            # Selecting a shape and checking it was followed are different
+            # things, and only the first was happening.
+            gaps = shape_gaps(measured, inp.evidence, grounding.text)
+            if gaps:
+                soft, soft_category = "; ".join(gaps), "shape_unfulfilled"
+        if soft and attempt < max_attempts:
+            _record(attempts_out, attempt, "rejected", soft_category, soft)
+            # Name the gate that actually fired. This was hardcoded to "dash
+            # overuse" above the shape branch, so a run killed by three
+            # unfulfilled shapes reported a punctuation problem — and the
+            # message on the terminal DrafterError is the one thing an
+            # operator has to work from when nothing came back.
+            last_failure = f"{soft_category} {soft} (attempt {attempt})"
+            if soft_category == "shape_unfulfilled":
+                retry_hint = (
+                    f"Your previous attempt did not deliver what the shape "
+                    f"asked for: missing {soft}. Follow the SHAPE section "
+                    f"above -- it names the parts this email needs."
+                )
+                continue
+            retry_hint = (
+                f"Your previous attempt used {soft}. You are leaning on the "
+                f"dash to join an observation to its explanation, which is "
+                f"the punctuation habit that makes writing read as generated. "
+                f"Use commas, or start a new sentence. At most one dash in "
+                f"the whole email, and only where it genuinely reads better."
+            )
+            continue
+
+        # All quality gates passed. A surviving soft issue is recorded on the
+        # accepted attempt rather than hidden — the draft went out with it.
+        _record(attempts_out, attempt, "accepted",
+                soft_category if soft else None, soft)
         return body
 
     msg = f"all {max_attempts} drafter attempts failed; last={last_failure}"
