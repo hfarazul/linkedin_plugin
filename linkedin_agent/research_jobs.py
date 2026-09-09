@@ -28,8 +28,8 @@ from dataclasses import dataclass, field
 
 from . import db
 from .config import Config
-from .providers import Capability, ProviderError, build_router
-from .providers.phantombuster import profile_from_row
+from .providers import Capability, MalformedResponse, ProviderError, build_router
+from .providers.phantombuster import _match_requested
 
 logger = logging.getLogger("linkedin.jobs")
 
@@ -71,6 +71,17 @@ def _apply_profile(job, rows: list) -> str:
     one write identical rows — including the rule that only fields the provider
     actually returned are written, so a provider gap cannot erase data the
     other provider previously stored.
+
+    The result file is agent-scoped, not job-scoped: two profile jobs in flight
+    on the same Phantom read the same `result.json`, and a container that
+    finished can still be serving the previous run's rows. Taking `rows[0]` on
+    trust therefore writes one prospect's headline and positions onto another —
+    and because `enriched_at` is stamped in the same statement, the wrong data
+    then sits there unrefreshed for the whole staleness window.
+
+    So the row is matched against the identifier the job was launched for, the
+    same check `fetch_profile` makes inline. A miss is a failure, not a
+    fallback: applying an unmatched row is the bug.
     """
     from .enrichment import _facts_to_db_fields
 
@@ -80,7 +91,20 @@ def _apply_profile(job, rows: list) -> str:
     if not rows:
         return "no rows returned"
 
-    facts = profile_from_row(rows[0])
+    target = job["target"]
+    if not target:
+        raise MalformedResponse(
+            f"job {job['id']} has no target to match the result against",
+            provider=job["provider"])
+    facts = _match_requested(rows, target)
+    if facts is None:
+        returned = ", ".join(
+            str(r.get("linkedinProfileSlug") or r.get("profileUrl") or "?")
+            for r in rows[:3])
+        raise MalformedResponse(
+            f"job {job['id']} asked for {target!r} but the result held "
+            f"{returned!r} — not applying it to prospect {prospect_id}",
+            provider=job["provider"])
     fields = _facts_to_db_fields(facts)
     fields["enriched_at"] = db.now()
     sets = ", ".join(f"{k} = ?" for k in fields)

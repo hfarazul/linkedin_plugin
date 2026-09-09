@@ -340,3 +340,84 @@ def test_collect_logs_an_enrich_action(db_env) -> None:
     payload = json.loads(row["payload"])
     assert payload["via"] == "job"
     assert payload["positions"] == 2
+
+
+@pytest.mark.integration
+def test_job_result_for_a_different_person_is_not_applied(db_env):
+    """The result file is agent-scoped, so it can hold somebody else's row.
+
+    Two profile jobs in flight on the same Profile Scraper read the same
+    `result.json`, and a container that reports finished can still be serving
+    the previous run's rows. Taking rows[0] on trust wrote one prospect's
+    headline and positions onto another — and stamped `enriched_at` in the
+    same statement, so the wrong data then sat there for the whole staleness
+    window instead of being refetched.
+
+    `fetch_profile` has always guarded this inline with _match_requested. The
+    job path did not.
+    """
+    from linkedin_agent import db, research_jobs
+    from linkedin_agent.providers.base import MalformedResponse
+
+    pid = db.upsert_prospect(
+        linkedin_url="https://www.linkedin.com/in/the-right-person",
+        full_name="Right Person",
+        provider_id="ACoRIGHTPERSON000000",
+    )
+    job_id = db.create_job(Capability.PROFILE.value, "phantombuster",
+                           prospect_id=pid, target="ACoRIGHTPERSON000000")
+    job = db.get_job(job_id)
+
+    # PROFILE_ROW is somebody else entirely — the previous run's target.
+    with pytest.raises(MalformedResponse, match="not applying it"):
+        research_jobs._apply_profile(job, [PROFILE_ROW])
+
+    after = db.get_prospect(pid)
+    assert after["headline"] is None, "another person's headline was written"
+    assert after["enriched_at"] is None, "a miss must not stamp freshness"
+    assert db.list_positions(pid) == []
+
+
+@pytest.mark.integration
+def test_job_result_for_the_requested_person_is_applied(db_env):
+    """The counterpart: a matching row still lands, keyed on the provider id."""
+    from linkedin_agent import db, research_jobs
+
+    pid = db.upsert_prospect(
+        linkedin_url="https://www.linkedin.com/in/anjan-b/",
+        full_name="Anjan B",
+        provider_id="ACoJOBTEST0000000000",
+    )
+    job_id = db.create_job(Capability.PROFILE.value, "phantombuster",
+                           prospect_id=pid, target="ACoJOBTEST0000000000")
+
+    summary = research_jobs._apply_profile(db.get_job(job_id), [PROFILE_ROW])
+
+    assert "applied" in summary
+    after = db.get_prospect(pid)
+    assert after["headline"] == "Software Engineer"
+    assert after["enriched_at"] is not None
+
+
+@pytest.mark.integration
+def test_a_mismatched_result_fails_the_job_rather_than_finishing_it(db_env):
+    """collect() must record the miss as a failure. Marking it finished with a
+    'did not match' summary would leave the prospect looking enriched."""
+    from linkedin_agent import db, research_jobs
+
+    pid = db.upsert_prospect(
+        linkedin_url="https://www.linkedin.com/in/the-right-person",
+        full_name="Right Person",
+        provider_id="ACoRIGHTPERSON000000",
+    )
+    job_id = db.create_job(Capability.PROFILE.value, "phantombuster",
+                           prospect_id=pid, target="ACoRIGHTPERSON000000",
+                           container_id="c1")
+
+    jobs = FakeJobs(status="finished", rows=[PROFILE_ROW])
+    router = _router(FakeAsyncProvider(jobs))
+    result = research_jobs.collect(_cfg(), router=router)
+
+    assert result.failed == 1 and result.finished == 0
+    assert db.get_job(job_id)["status"] == "failed"
+    assert db.get_prospect(pid)["enriched_at"] is None

@@ -222,3 +222,87 @@ def test_rejection_fixtures_clear_the_length_floor(body, gate) -> None:
     gate rejected it and the test recorded length_under while claiming to
     exercise the Cortivo gate."""
     assert len(body) >= d.KIND_MIN_CHARS["email1"], f"{gate}: {len(body)} chars"
+
+
+# ============================ soft gates =====================================
+
+# Clean on every hard gate, but delivers no question — so the
+# observation_question shape it was assigned is unfulfilled.
+NO_QUESTION = ("Hi Ahmed,\n\nWriting off the back of your move to Millennium "
+               "Hotels, where you head up operations across the GCC and "
+               "Iraq.\n\nI'm Haque, co-founder of Cortivo. We pair a senior "
+               "engineer with AI tooling so a non-technical founder gets the "
+               "equivalent of a 3-4 person eng team for one engineer's "
+               "cost.\n\nHappy to be told this is not relevant.\n\nBest,\n"
+               "Haque\nCortivo")
+
+
+def _drive_with_shape(monkeypatch, responses, shape_name="observation_question"):
+    """As _drive, but assigns a shape so the shape_unfulfilled gate can fire."""
+    from linkedin_agent import evidence as ev
+
+    seen = []
+
+    def fake(prompt, timeout=90):
+        seen.append(prompt)
+        return responses[min(len(seen) - 1, len(responses) - 1)]
+
+    monkeypatch.setattr(d, "_invoke_claude", fake)
+    monkeypatch.setattr(d, "build_input",
+                        lambda kind, pid, recent_posts=None, evidence=None:
+                        d.DrafterInput(kind=kind, campaign={"brief": ""},
+                                       prospect={}, evidence=evidence))
+    shape = next(s for s in ev._SHAPES if s.name == shape_name)
+    tries: list = []
+    bundle = build_evidence(FACTS, [], transition_is_direct=True)
+    body = d.draft("email1", 1, evidence=bundle.as_dict(shape=shape),
+                   attempts_out=tries)
+    return body, tries
+
+
+@pytest.mark.unit
+def test_an_unfulfilled_shape_is_recorded_as_such_not_as_dash_overuse(monkeypatch) -> None:
+    """Which gate fired is the useful part of a rejection.
+
+    The two soft gates share a branch, and the failure description was built
+    before the branch that distinguishes them — so a shape rejection was
+    reported as a punctuation problem. The attempt history has to name the gate
+    that actually fired or it misdirects the next thing anyone tries.
+    """
+    body, tries = _drive_with_shape(monkeypatch, [NO_QUESTION, CLEAN])
+
+    assert body == CLEAN
+    assert [t.outcome for t in tries] == ["rejected", "accepted"]
+    assert tries[0].category == "shape_unfulfilled"
+    assert "question" in (tries[0].reason or "")
+    assert "dash" not in (tries[0].reason or "").lower()
+
+
+@pytest.mark.unit
+def test_a_soft_gate_never_destroys_the_last_draft(monkeypatch) -> None:
+    """Soft gates re-prompt while budget remains and then yield.
+
+    A draft that misses its shape is worse than one that hits it, and far
+    better than no draft at all — the opposite trade to the correctness gates,
+    which would rather send nothing. The surviving issue is recorded ON the
+    accepted attempt rather than hidden, because it went out with it.
+    """
+    body, tries = _drive_with_shape(monkeypatch, [NO_QUESTION])
+
+    assert body == NO_QUESTION, "a soft failure must not raise"
+    assert len(tries) == d.MAX_DRAFT_ATTEMPTS
+    assert tries[-1].outcome == "accepted"
+    assert tries[-1].category == "shape_unfulfilled"
+    assert tries[-1].reason
+
+
+@pytest.mark.unit
+def test_dash_overuse_is_still_reported_as_dash_overuse(monkeypatch) -> None:
+    """The counterpart: naming the branch must not mislabel the other gate."""
+    dashes = CLEAN.replace("operations across the GCC",
+                           "operations - across - the GCC")
+    body, tries = _drive_with_shape(monkeypatch, [dashes, CLEAN])
+
+    assert body == CLEAN
+    assert tries[0].category == "dash_overuse"
+    assert "dash" in (tries[0].reason or "")

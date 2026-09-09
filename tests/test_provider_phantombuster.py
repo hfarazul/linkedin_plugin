@@ -279,23 +279,62 @@ def test_verified_capability_requires_a_configured_agent(monkeypatch) -> None:
 
 
 @pytest.mark.unit
-def test_writes_are_enabled_but_reported_as_unverified(monkeypatch) -> None:
-    """Changed when Unipile was removed.
+def test_unverified_writes_stay_disarmed_until_opted_in(monkeypatch) -> None:
+    """Configuring a Phantom must not be the same act as arming it.
 
-    While a fallback existed, gating an unverified capability OFF routed
-    around it. With PhantomBuster the only provider, gating it off does not
-    route around anything — it just breaks the pipeline. So writes are enabled,
-    and the fact that their output has never been inspected is surfaced through
-    verification() and the `providers` view instead of by refusing to serve.
+    An earlier revision enabled every implemented capability, on the reasoning
+    that with no fallback left, gating one off does not route around it — it
+    just breaks the pipeline. That reasoning holds for reads and fails for
+    writes: a read that comes back wrong raises, while a write reaches a real
+    person and cannot be taken back. PHANTOMBUSTER_ENABLE_UNVERIFIED was parsed
+    for exactly this and then never read, so setting an agent id armed an
+    uninspected Phantom on the next cron fire.
 
-    The safety property moved rather than disappeared: an unverified write
-    still returns ActionResult(status="unknown") rather than claiming delivery.
+    The capability is still reported as implemented-but-unverified; it simply
+    will not serve until named.
     """
     monkeypatch.setenv("PHANTOMBUSTER_API_KEY", "k" * 20)
     monkeypatch.setenv("PHANTOMBUSTER_AGENT_AUTO_CONNECT", "456")
+    monkeypatch.delenv("PHANTOMBUSTER_ENABLE_UNVERIFIED", raising=False)
+
+    provider = PhantomBusterProvider(_Cfg())
+    assert not provider.supports(Capability.CONNECT)
+    assert provider.requires_opt_in(Capability.CONNECT)
+    assert provider.verification(Capability.CONNECT) == "unverified"
+
+    monkeypatch.setenv("PHANTOMBUSTER_ENABLE_UNVERIFIED", "connect")
+    opted_in = PhantomBusterProvider(_Cfg())
+    assert opted_in.supports(Capability.CONNECT)
+    assert opted_in.verification(Capability.CONNECT) == "unverified"
+
+
+@pytest.mark.unit
+def test_opting_one_write_in_does_not_arm_the_others(monkeypatch) -> None:
+    """The flag is per capability. Enabling `connect` after its verification
+    task passes must not also enable DMs, whose Phantom is still uninspected."""
+    monkeypatch.setenv("PHANTOMBUSTER_API_KEY", "k" * 20)
+    monkeypatch.setenv("PHANTOMBUSTER_AGENT_AUTO_CONNECT", "456")
+    monkeypatch.setenv("PHANTOMBUSTER_AGENT_MESSAGE_SENDER", "789")
+    monkeypatch.setenv("PHANTOMBUSTER_ENABLE_UNVERIFIED", "connect")
+
     provider = PhantomBusterProvider(_Cfg())
     assert provider.supports(Capability.CONNECT)
-    assert provider.verification(Capability.CONNECT) == "unverified"
+    assert not provider.supports(Capability.SEND_DM)
+
+
+@pytest.mark.unit
+def test_unverified_reads_need_no_opt_in(monkeypatch) -> None:
+    """Reads keep the old behaviour. Gating one off routes around nothing now
+    that PhantomBuster is the only provider, and a malformed read raises rather
+    than reaching anybody — so the cost is a broken pipeline for no safety."""
+    monkeypatch.setenv("PHANTOMBUSTER_API_KEY", "k" * 20)
+    monkeypatch.setenv("PHANTOMBUSTER_AGENT_ACTIVITY_EXTRACTOR", "321")
+    monkeypatch.delenv("PHANTOMBUSTER_ENABLE_UNVERIFIED", raising=False)
+
+    provider = PhantomBusterProvider(_Cfg())
+    assert provider.supports(Capability.RECENT_POSTS)
+    assert not provider.requires_opt_in(Capability.RECENT_POSTS)
+    assert provider.verification(Capability.RECENT_POSTS) == "unverified"
 
 
 @pytest.mark.unit
@@ -770,3 +809,66 @@ def test_a_missing_company_name_suppresses_the_claim() -> None:
     prev = _pos("", "2022-01-01", "2023-01-01")
     cur = _pos("Acme", "2023-02-01", None, is_current=True)
     assert is_direct_transition(prev, cur) is False
+
+
+@pytest.mark.unit
+def test_a_current_role_outranks_an_ended_one_with_a_readable_date() -> None:
+    """positions[0] is "where they work now" to everything downstream.
+
+    Sorting on start_date alone put a current role whose date range did not
+    parse behind an ended job that happened to have a readable start, so
+    positions[0] was a former employer. build_evidence then states that as a
+    VERIFIED_FACT and the email tells a stranger they work somewhere they left.
+
+    An unparseable date is missing information about a job we know is current.
+    It is not evidence that the job is old.
+    """
+    from linkedin_agent.providers.phantombuster import profile_from_row
+
+    row = dict(PROFILE_ROW)
+    row["linkedinJobTitle"] = "Chief Executive Officer"
+    row["linkedinCompanyName"] = "Currently Here"
+    row["linkedinJobDateRange"] = "Present"          # no parseable start
+    row["linkedinPreviousJobTitle"] = "Analyst"
+    row["previousCompanyName"] = "Left In 2019"
+    row["linkedinPreviousJobDateRange"] = "Jan 2015 - Mar 2019"
+
+    facts = profile_from_row(row)
+
+    assert facts.positions[0].company == "Currently Here"
+    assert facts.positions[0].is_current
+    assert facts.positions[1].company == "Left In 2019"
+
+
+@pytest.mark.unit
+def test_two_current_roles_still_order_by_start_date() -> None:
+    """Within the current group, newest first — the previous behaviour."""
+    from linkedin_agent.providers.phantombuster import profile_from_row
+
+    row = dict(PROFILE_ROW)
+    row["linkedinCompanyName"] = "Older Current"
+    row["linkedinJobDateRange"] = "Feb 2020 - Present"
+    row["previousCompanyName"] = "Newer Current"
+    row["linkedinPreviousJobDateRange"] = "Aug 2025 - Present"
+
+    facts = profile_from_row(row)
+
+    assert [p.company for p in facts.positions] == ["Newer Current", "Older Current"]
+    assert all(p.is_current for p in facts.positions)
+
+
+@pytest.mark.unit
+def test_two_ended_roles_still_order_by_start_date() -> None:
+    """And within the ended group, unchanged as well — no current role to lead."""
+    from linkedin_agent.providers.phantombuster import profile_from_row
+
+    row = dict(PROFILE_ROW)
+    row["linkedinCompanyName"] = "Older Job"
+    row["linkedinJobDateRange"] = "Jan 2012 - Jan 2015"
+    row["previousCompanyName"] = "Newer Job"
+    row["linkedinPreviousJobDateRange"] = "Feb 2018 - Mar 2021"
+
+    facts = profile_from_row(row)
+
+    assert [p.company for p in facts.positions] == ["Newer Job", "Older Job"]
+    assert not any(p.is_current for p in facts.positions)

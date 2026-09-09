@@ -411,12 +411,40 @@ def set_disposition(prospect_id: int, disposition: str) -> None:
         )
 
 
-def record_dm(prospect_id: int) -> None:
-    """Called after a DM is successfully sent. Bumps dm_count and last_dm_at."""
+def record_dm(prospect_id: int, *, confirmed: bool = True) -> None:
+    """Called after a DM is dispatched. Always bumps dm_count; sets last_dm_at
+    only when delivery was actually confirmed.
+
+    The two columns answer different questions, and an unconfirmed send needs
+    different answers to each:
+
+      dm_count    "have we already tried to send this one?"  Bumped either
+                  way. Without it the daily cycle sees dm_count=0 and drafts
+                  dm1 again on the next tick, and again on the one after —
+                  re-sending is a worse failure than any bookkeeping gap.
+
+      last_dm_at  "when did they last receive something?"  Cleared when nobody
+                  can say they did. PhantomBuster reports that a container
+                  finished, not that a recipient got anything, and a follow-up
+                  cadence measured from a send that may never have landed
+                  produces "circling back on what I sent last week" to someone
+                  who was sent nothing.
+
+    Cleared rather than left at its previous value: an unconfirmed dm2 that
+    kept dm1's timestamp would still let dm3 come due, timed from a message two
+    steps back. The scheduling field means "when we know they last heard from
+    us", and after an unobserved send we do not know. The real history is in
+    `messages` and `actions`, neither of which this touches.
+
+    NULL last_dm_at makes is_dm2_due / is_dm3_due return False, so the prospect
+    parks rather than advancing on an unverified premise. `status` surfaces
+    these under unconfirmed sends so parked is not the same as forgotten.
+    """
     with connect() as conn:
         conn.execute(
-            "UPDATE prospects SET dm_count = dm_count + 1, last_dm_at = ? WHERE id = ?",
-            (now(), prospect_id),
+            "UPDATE prospects SET dm_count = dm_count + 1, last_dm_at = ? "
+            "WHERE id = ?",
+            (now() if confirmed else None, prospect_id),
         )
 
 

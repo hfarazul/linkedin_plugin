@@ -30,6 +30,7 @@ from .capabilities import (
     InboundMessage,
     Position,
     ProfileFacts,
+    is_write,
 )
 from .pb_jobs import PhantomBusterJobs
 
@@ -37,10 +38,13 @@ logger = logging.getLogger("linkedin.providers.phantombuster")
 
 # What we have actually seen this provider return. Kept separate from what it
 # is allowed to serve, because with Unipile removed PhantomBuster is the only
-# provider — gating a capability off no longer routes around it, it just breaks
-# the pipeline. So everything implemented is enabled, and the distinction lives
-# here so `linkedin providers` can keep showing which capabilities rest on
-# inspected output and which are still taken on trust.
+# provider — gating a READ off no longer routes around it, it just breaks the
+# pipeline, so unverified reads are enabled and `linkedin providers` shows
+# which of them rest on inspected output.
+#
+# Unverified WRITES are gated: see supports(). They reach real people and
+# cannot be taken back, so they stay disarmed until named in
+# PHANTOMBUSTER_ENABLE_UNVERIFIED.
 VERIFIED = frozenset({
     Capability.PROFILE,
     Capability.EXPERIENCE,
@@ -206,9 +210,19 @@ def profile_from_row(row: dict) -> ProfileFacts:
             raw={k: row.get(k) for k in (title_key, range_key, company_key)},
         ))
 
-    # Sort newest-first so callers can reason chronologically. Positions with
-    # no parseable start sort last rather than pretending to be recent.
-    positions.sort(key=lambda p: p.start_date or "", reverse=True)
+    # Current roles first, then newest-first within each group. Positions with
+    # no parseable start sort last of their group rather than pretending to be
+    # recent.
+    #
+    # `is_current` has to lead. Sorting on start_date alone put a current role
+    # whose date range did not parse ("- Present", a localised month, a blank)
+    # behind an ended job that happened to have a readable start, so
+    # positions[0] was a former employer. Everything downstream treats
+    # positions[0] as where the person works now: build_evidence states it as
+    # a VERIFIED_FACT, and the email then tells a stranger they work somewhere
+    # they left. An unparseable date is missing information about a job we
+    # know is current; it is not evidence that the job is old.
+    positions.sort(key=lambda p: (p.is_current, p.start_date or ""), reverse=True)
 
     return ProfileFacts(
         provider_id=extract_provider_id(row.get("linkedinProfileUrn")
@@ -347,7 +361,33 @@ class PhantomBusterProvider(CapabilityProvider):
         # halfway through an operation.
         if not self.api_key or not self._agent_id(capability):
             return False
-        return capability in SUPPORTED
+        if capability not in SUPPORTED:
+            return False
+        # Unverified READS stay on. With Unipile gone there is nothing to route
+        # around to, so gating a read off does not make the system safer — it
+        # just breaks the pipeline, and a read that returns the wrong shape
+        # raises MalformedResponse rather than reaching anybody.
+        #
+        # Unverified WRITES are the opposite case, and the reason this flag
+        # exists. React, connect and send_dm reach real people irreversibly
+        # through Phantoms whose output has never been inspected, and a
+        # container that finishes is not per-recipient confirmation. Setting an
+        # agent id is how you configure one; it should not also be how you arm
+        # one. Until its verification task passes, an unverified write requires
+        # naming the capability in PHANTOMBUSTER_ENABLE_UNVERIFIED — which is
+        # what .env.example and the `providers` hint have always claimed.
+        if capability in UNVERIFIED and is_write(capability):
+            return capability.value in self._enabled_unverified
+        return True
+
+    def requires_opt_in(self, capability: Capability) -> bool:
+        """True when this capability is gated behind the opt-in flag.
+
+        Lets `providers` distinguish "no agent id configured" from "configured
+        but deliberately disarmed", which are different problems with different
+        fixes.
+        """
+        return capability in UNVERIFIED and is_write(capability)
 
     def verification(self, capability: Capability) -> str:
         """VERIFIED / UNVERIFIED / UNSUPPORTED — surfaced by `providers`."""

@@ -73,6 +73,18 @@ class RouterAdapter(LinkedInAdapter):
         self.router.close()
 
 
+# Marker for a write that was dispatched but whose delivery nobody observed.
+# The send funnel keys off this to decide whether the follow-up clock may
+# start, so the prefix is a contract between this module and
+# bot_daemon.send_draft_via_adapter rather than a log-only string.
+UNCONFIRMED_PREFIX = "dispatched:unconfirmed:"
+
+
+def is_unconfirmed(api_result) -> bool:
+    """True when a write reached the provider but delivery was never confirmed."""
+    return isinstance(api_result, str) and api_result.startswith(UNCONFIRMED_PREFIX)
+
+
 def _result_string(result, label: str) -> str:
     """Collapse an ActionResult into the string the old interface expects,
     without pretending an unconfirmed write succeeded.
@@ -90,7 +102,8 @@ def _result_string(result, label: str) -> str:
             "%s dispatched via %s but delivery is unconfirmed "
             "(container finished; no per-recipient outcome)",
             label, result.provider)
-        return f"dispatched:unconfirmed:{result.provider}:{result.external_id or '?'}"
+        return (f"{UNCONFIRMED_PREFIX}{result.provider}:"
+                f"{result.external_id or '?'}")
     if result.status == "failed":
         return f"failed:{result.error_code or 'unknown'}"
     return result.external_id or "sent"

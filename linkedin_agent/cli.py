@@ -419,6 +419,18 @@ def status() -> None:
         elif is_dm2_due(p, now):
             due_followups.append((p["full_name"], "DM2"))
 
+    # --- Sends the provider could not confirm -------------------------------
+    # These deliberately never come due as follow-ups, so without a line here
+    # they would sit in `dm_sent` indefinitely and look like nothing needed
+    # doing. Parked is meant to be visible, not quiet.
+    with db.connect() as conn:
+        unconfirmed = list(conn.execute(
+            """SELECT a.prospect_id, p.full_name, a.payload, a.created_at
+                 FROM actions a JOIN prospects p ON p.id = a.prospect_id
+                WHERE a.kind = 'send_unconfirmed'
+                  AND p.status != 'replied'
+             ORDER BY a.created_at DESC LIMIT 10"""))
+
     # --- Render -------------------------------------------------------------
     console.print()
     console.print(f"  [bold]Caps today[/bold]    {caps_line}")
@@ -455,6 +467,20 @@ def status() -> None:
         console.print(f"📅 [bold]{len(due_followups)}[/bold] follow-up(s) due:")
         for name, kind in due_followups[:5]:
             console.print(f"    • {name} ({kind})")
+
+    if unconfirmed:
+        console.print()
+        console.print(f"[bold yellow]❓ {len(unconfirmed)} send(s) the provider "
+                      f"could not confirm[/bold yellow]")
+        console.print("[dim]   pipeline advanced so nothing sends twice; "
+                      "follow-ups are parked until you check LinkedIn[/dim]")
+        for row in unconfirmed[:5]:
+            who = row["full_name"] or f"prospect {row['prospect_id']}"
+            try:
+                kind = json.loads(row["payload"] or "{}").get("kind", "?")
+            except (ValueError, TypeError):
+                kind = "?"
+            console.print(f"    • {who} ({kind}) — {(row['created_at'] or '')[:16]}")
 
     console.print()
 
@@ -534,10 +560,24 @@ def providers() -> None:
         for col in ("capability", "kind", "owner", "evidence"):
             t.add_column(col)
         chain = {c: router.providers_for(c) for c in Capability}
+        # A capability can be unroutable for two different reasons, and the
+        # fixes are opposite: nothing is configured, or it is configured and
+        # deliberately disarmed pending verification. Reporting both as NONE
+        # sends someone hunting for a missing agent id that is already set.
+        disarmed = []
+        for candidate in (router.primary, router.fallback):
+            if candidate is None or not hasattr(candidate, "requires_opt_in"):
+                continue
+            disarmed += [c for c in Capability
+                         if not candidate.supports(c)
+                         and candidate.requires_opt_in(c)
+                         and getattr(candidate, "_agent_id", lambda _c: None)(c)]
         for cap in Capability:
             owner = router.owner_of(cap)
             kind = "write" if is_write(cap) else "read"
-            if owner is None:
+            if owner is None and cap in disarmed:
+                shown = "[yellow]DISARMED[/yellow]"
+            elif owner is None:
                 shown = "[red]NONE[/red]"
             elif owner == primary:
                 shown = f"[green]{owner}[/green]"
@@ -556,12 +596,23 @@ def providers() -> None:
                 }.get(level, level)
             t.add_row(cap.value, kind, shown, evidence)
         console.print(t)
-        unrouted = [c.value for c in Capability if router.owner_of(c) is None]
+        unrouted = [c.value for c in Capability
+                    if router.owner_of(c) is None and c not in disarmed]
         if unrouted:
             console.print()
             console.print(f"[yellow]unroutable:[/yellow] {', '.join(unrouted)}")
-            console.print("[dim]check credentials, agent ids, and "
-                          "PHANTOMBUSTER_ENABLE_UNVERIFIED[/dim]")
+            console.print("[dim]no provider supports these, or credentials / "
+                          "agent ids are missing[/dim]")
+        if disarmed:
+            console.print()
+            console.print(f"[yellow]disarmed:[/yellow] "
+                          f"{', '.join(c.value for c in disarmed)}")
+            console.print("[dim]agent configured, but the Phantom's output has "
+                          "never been inspected. These writes reach real "
+                          "people, so enable one only after its verification "
+                          "task passes:[/dim]")
+            console.print(f"[dim]  PHANTOMBUSTER_ENABLE_UNVERIFIED="
+                          f"{','.join(c.value for c in disarmed)}[/dim]")
         console.print()
     finally:
         router.close()

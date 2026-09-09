@@ -852,7 +852,12 @@ def draft(
                 soft, soft_category = "; ".join(gaps), "shape_unfulfilled"
         if soft and attempt < max_attempts:
             _record(attempts_out, attempt, "rejected", soft_category, soft)
-            last_failure = f"dash overuse {soft} (attempt {attempt})"
+            # Name the gate that actually fired. This was hardcoded to "dash
+            # overuse" above the shape branch, so a run killed by three
+            # unfulfilled shapes reported a punctuation problem — and the
+            # message on the terminal DrafterError is the one thing an
+            # operator has to work from when nothing came back.
+            last_failure = f"{soft_category} {soft} (attempt {attempt})"
             if soft_category == "shape_unfulfilled":
                 retry_hint = (
                     f"Your previous attempt did not deliver what the shape "

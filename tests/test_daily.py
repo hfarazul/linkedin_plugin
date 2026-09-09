@@ -477,3 +477,106 @@ def test_daily_full_chain(db_env, fake_telegram):
     assert result.dm2_drafts == 1         # p4
     assert len(db.list_pending_drafts()) == 4
     assert len(fake_telegram.drafts_pushed) == 4
+
+
+# ===== unconfirmed sends ====================================================
+
+class _UnconfirmedAdapter:
+    """An adapter whose writes dispatch but cannot confirm delivery.
+
+    This is what PhantomBuster actually reports: a container finished. It is
+    not per-recipient delivery, which is why the provider returns
+    ActionResult(status="unknown") and RouterAdapter renders it with the
+    dispatched:unconfirmed: prefix.
+    """
+
+    def send_connection(self, url, note=None):
+        return "dispatched:unconfirmed:phantombuster:c-123"
+
+    def send_dm(self, url, body):
+        return "dispatched:unconfirmed:phantombuster:c-456"
+
+    def close(self):
+        pass
+
+
+@pytest.mark.integration
+def test_unconfirmed_dm_advances_the_pipeline_but_not_the_clock(db_env):
+    """Two properties that pull in opposite directions, both required.
+
+    dm_count must move, or the next cron tick sees dm_count=0 and drafts dm1
+    again — re-sending is the worse failure. last_dm_at must NOT move, because
+    a follow-up cadence timed from a send nobody observed produces "circling
+    back on what I sent last week" to someone who was sent nothing.
+    """
+    from datetime import datetime, timezone
+    from linkedin_agent import db
+    from linkedin_agent.bot_daemon import send_draft_via_adapter
+    from linkedin_agent.followup import is_dm2_due
+
+    pid = db.upsert_prospect(
+        linkedin_url="https://www.linkedin.com/in/unconfirmed-dm",
+        full_name="Unconfirmed DM")
+    with db.connect() as conn:
+        conn.execute("UPDATE prospects SET status='connected' WHERE id=?", (pid,))
+    did = db.enqueue_draft(pid, "dm1", "a body long enough to be a real draft")
+
+    send_draft_via_adapter(_make_cfg(), _UnconfirmedAdapter(), db.get_draft(did))
+
+    row = db.get_prospect(pid)
+    assert row["status"] == "dm_sent", "must advance so dm1 is not re-drafted"
+    assert row["dm_count"] == 1
+    assert row["last_dm_at"] is None, "the follow-up clock must not start"
+
+    # And the cadence genuinely does not fire, however long we wait.
+    assert not is_dm2_due(row, datetime(2027, 1, 1, tzinfo=timezone.utc))
+
+
+@pytest.mark.integration
+def test_unconfirmed_send_is_logged_under_its_own_action_kind(db_env):
+    """Findable without parsing result strings — `status` counts these so a
+    parked prospect is visible rather than merely quiet."""
+    from linkedin_agent import db
+    from linkedin_agent.bot_daemon import send_draft_via_adapter
+
+    pid = db.upsert_prospect(
+        linkedin_url="https://www.linkedin.com/in/unconfirmed-log",
+        full_name="Unconfirmed Log")
+    with db.connect() as conn:
+        conn.execute("UPDATE prospects SET status='reacted' WHERE id=?", (pid,))
+    did = db.enqueue_draft(pid, "connect_note", "a connect note body")
+
+    send_draft_via_adapter(_make_cfg(), _UnconfirmedAdapter(), db.get_draft(did))
+
+    with db.connect() as conn:
+        kinds = [r["kind"] for r in conn.execute(
+            "SELECT kind FROM actions WHERE prospect_id=?", (pid,)).fetchall()]
+    assert "send_unconfirmed" in kinds
+    # Still advanced, so a second invite is never sent.
+    assert db.get_prospect(pid)["status"] == "connection_sent"
+
+
+@pytest.mark.integration
+def test_a_confirmed_send_still_starts_the_clock(db_env):
+    """The counterpart: an ordinary adapter result is unchanged."""
+    from linkedin_agent import db
+    from linkedin_agent.adapters import get_adapter
+    from linkedin_agent.bot_daemon import send_draft_via_adapter
+
+    pid = db.upsert_prospect(
+        linkedin_url="https://www.linkedin.com/in/confirmed-dm",
+        full_name="Confirmed DM")
+    with db.connect() as conn:
+        conn.execute("UPDATE prospects SET status='connected' WHERE id=?", (pid,))
+    did = db.enqueue_draft(pid, "dm1", "a body long enough to be a real draft")
+
+    cfg = _make_cfg()
+    adapter = get_adapter(cfg)
+    try:
+        send_draft_via_adapter(cfg, adapter, db.get_draft(did))
+    finally:
+        adapter.close()
+
+    row = db.get_prospect(pid)
+    assert row["dm_count"] == 1
+    assert row["last_dm_at"] is not None

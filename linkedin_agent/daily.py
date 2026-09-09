@@ -145,11 +145,14 @@ def run_daily(
             result.errors.append(f"poll: {e}")
 
         # --- 2.5 check connection acceptances ----------------------------------
-        # Unipile's messages endpoint doesn't surface accept events, so we
-        # poll profile-distance for every `connection_sent` prospect. Anyone
-        # who is now 1st-degree accepted the invite — flip them to `connected`
-        # so step 5 (dm1) drafts a follow-up in the SAME run. Only runs when
-        # Unipile creds are configured; tests with fake adapter skip this.
+        # No provider surfaces accept events, so we poll profile-distance for
+        # `connection_sent` prospects. Anyone who is now 1st-degree accepted
+        # the invite — flip them to `connected` so step 5 (dm1) drafts a
+        # follow-up in the SAME run.
+        #
+        # Bounded per cycle: the current provider answers this with a full
+        # profile re-scrape, which is a container launch rather than a cheap
+        # GET. See _ACCEPTANCE_CHECK_BUDGET.
         # Gate on capability, not on one vendor's credentials: whether we can
         # detect acceptances is a question about the configured providers, and
         # asking about Unipile keys specifically stopped meaning anything when
@@ -164,7 +167,8 @@ def run_daily(
         if _can_check:
             try:
                 from .enrichment import check_acceptances
-                accept_result = check_acceptances(cfg)
+                accept_result = check_acceptances(
+                    cfg, limit=_acceptance_check_budget())
                 result.accepts_detected = accept_result.detected
                 if accept_result.errors:
                     result.errors.extend(accept_result.error_messages[:3])
@@ -401,6 +405,42 @@ def _is_claude_unavailable_failure(exc: Exception) -> bool:
 # we're in a bad cron context and stop firing more drafter calls. Three is
 # enough to distinguish a genuine pattern from a one-off transient hiccup.
 _CLAUDE_FAILURE_BREAKER_THRESHOLD = 3
+
+
+# How many pending invites this cycle may check for acceptance.
+#
+# Under Unipile an acceptance check was one ~30ms GET, so checking every
+# pending invite on every tick cost nothing and the call was made unbounded.
+# PhantomBuster's equivalent re-scrapes the profile: a container launch, a
+# browser boot, `wait()` up to 300s, plus the result-settle retries. Twenty
+# pending invites is then twenty Phantom launches inside one hourly tick, and
+# the run cannot finish before the next one starts.
+#
+# Four is the ceiling that keeps the worst case (4 x ~320s) inside the hour
+# with room for the rest of the cycle. Invites are not missed, only deferred:
+# `list_prospects` orders by last_action_at DESC NULLS LAST and a detected
+# accept leaves the queue, so successive ticks work through the backlog.
+#
+# The real answer is routing acceptance checks through research_jobs like
+# profile scrapes, so the cron submits and collects instead of blocking. That
+# needs an ACCEPTANCE_CHECK handler; this bound is what stops the cron
+# overrunning until it exists.
+_ACCEPTANCE_CHECK_BUDGET = 4
+
+
+def _acceptance_check_budget() -> int | None:
+    """Per-cycle acceptance-check cap. None means unbounded (opt-in)."""
+    import os
+    raw = (os.getenv("DAILY_MAX_ACCEPTANCE_CHECKS") or "").strip()
+    if not raw:
+        return _ACCEPTANCE_CHECK_BUDGET
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("DAILY_MAX_ACCEPTANCE_CHECKS=%r is not an integer; "
+                       "using default %d", raw, _ACCEPTANCE_CHECK_BUDGET)
+        return _ACCEPTANCE_CHECK_BUDGET
+    return None if value <= 0 else value
 
 
 def _fetch_posts_for_draft(adapter, prospect, *, limit: int = 3, cache: dict | None = None) -> list[dict]:

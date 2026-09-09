@@ -160,3 +160,74 @@ def test_daily_runs_acceptance_check_and_drafts_dm1_same_cycle(db_env, fake_tele
     assert refreshed["status"] == "connected"
     # AND the dm1 step ran in the same cycle (no waiting for next cron)
     assert result.dm1_drafts == 1
+
+
+# ===== per-cycle budget ====================================================
+
+@pytest.mark.integration
+def test_daily_bounds_how_many_invites_it_checks(db_env, fake_telegram, monkeypatch):
+    """An hourly cron must be able to finish.
+
+    Under Unipile an acceptance check was one ~30ms GET, so the call was made
+    unbounded. PhantomBuster answers the same question with a full profile
+    re-scrape — a container launch, a browser boot, wait() up to 300s, plus
+    result-settle retries. Twenty pending invites then meant twenty Phantom
+    launches inside one tick, and the run could not finish before the next one
+    started.
+
+    Nothing is lost, only deferred: a detected accept leaves the queue, so
+    successive ticks work through the backlog.
+    """
+    from linkedin_agent import daily as daily_mod, db
+    from linkedin_agent.adapters import get_adapter
+
+    for n in range(10):
+        pid = db.upsert_prospect(
+            linkedin_url=f"https://www.linkedin.com/in/budget-{n}",
+            full_name=f"Budget {n}",
+            provider_id=f"ACoBUDGET{n:04d}",
+        )
+        with db.connect() as conn:
+            conn.execute("UPDATE prospects SET status='connection_sent' WHERE id=?",
+                         (pid,))
+
+    checked: list[str] = []
+
+    class CountingProvider(FakeProvider):
+        def check_acceptance(self, identifier):
+            checked.append(identifier)
+            return False        # nobody accepts, so none leave the queue
+
+    provider = CountingProvider()
+    for target in ("linkedin_agent.providers.build_router",
+                   "linkedin_agent.enrichment.build_router"):
+        monkeypatch.setattr(target, lambda cfg, **kw: fake_router(provider))
+
+    cfg = _cfg()
+    adapter = get_adapter(cfg)
+    try:
+        daily_mod.run_daily(cfg, adapter=adapter, telegram=fake_telegram,
+                            drafter=lambda *a, **k: "unused")
+    finally:
+        adapter.close()
+
+    assert len(checked) == daily_mod._ACCEPTANCE_CHECK_BUDGET
+    assert len(checked) < 10, "the whole queue was checked in one tick"
+
+
+@pytest.mark.unit
+def test_acceptance_budget_is_configurable_and_can_be_lifted(monkeypatch):
+    """A faster provider should not be held to a slow provider's ceiling."""
+    from linkedin_agent import daily as daily_mod
+
+    monkeypatch.delenv("DAILY_MAX_ACCEPTANCE_CHECKS", raising=False)
+    assert daily_mod._acceptance_check_budget() == daily_mod._ACCEPTANCE_CHECK_BUDGET
+
+    monkeypatch.setenv("DAILY_MAX_ACCEPTANCE_CHECKS", "25")
+    assert daily_mod._acceptance_check_budget() == 25
+
+    monkeypatch.setenv("DAILY_MAX_ACCEPTANCE_CHECKS", "0")
+    assert daily_mod._acceptance_check_budget() is None, "0 means unbounded"
+
+    monkeypatch.setenv("DAILY_MAX_ACCEPTANCE_CHECKS", "not-a-number")
+    assert daily_mod._acceptance_check_budget() == daily_mod._ACCEPTANCE_CHECK_BUDGET

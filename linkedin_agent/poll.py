@@ -21,10 +21,14 @@ from __future__ import annotations
 # For each new inbound message we:
 #   1. Look up the prospect by sender provider_id.
 #   2. Insert the inbound row into messages with external_id = unipile id.
-#   3. Flip prospect.status to 'replied'.
+#   3. Flip prospect.status to 'replied'          — recent inbounds only.
 #   4. Cancel any pending/approved drafts for this prospect (a reply halts
 #      the follow-up sequence — Phase 6's auto-followup respects this).
+#      Recent inbounds only, for the same reason.
 #   5. Push a Telegram notification with the excerpt + profile link.
+#
+# Steps 3 and 4 are gated on REPLY_DRAFT_MAX_AGE_DAYS: a backlog message is
+# recorded and notified but must not act on a live pipeline. See _is_stale.
 #
 # Messages where the sender provider_id doesn't match any prospect we know
 # about are skipped silently — those are random LinkedIn DMs (recruiters, etc.)
@@ -170,20 +174,40 @@ def poll_once(
 
             new_inbound += 1
 
-            # Halt the follow-up sequence for this prospect.
-            cancelled = db.cancel_pending_drafts_for(
-                int(prospect["id"]), reason="reply_received"
-            )
-            if cancelled:
-                logger.info(
-                    "cancelled %d pending draft(s) for prospect %d (reply received)",
-                    cancelled, prospect["id"],
-                )
+            # Age is decided BEFORE anything acts on the message. The Inbox
+            # Scraper is incremental, so its first run against a real account
+            # returns the entire backlog — the captured inbox held threads
+            # whose last message was 15 months old. Cancelling drafts and
+            # flipping status on those permanently halts a live sequence
+            # because of a conversation that ended over a year ago, and
+            # nothing later in this loop can undo it.
+            #
+            # A stale inbound is still recorded and still notified: history and
+            # dedup both need the row, and the operator should see it. What it
+            # does not do is touch the pipeline.
+            stale = _is_stale(m.sent_at)
 
-            db.set_status(int(prospect["id"]), "replied")
+            if stale:
+                logger.info(
+                    "inbound for prospect %d dates from %s — recording it, but "
+                    "leaving status and pending drafts alone",
+                    prospect["id"], m.sent_at)
+            else:
+                # Halt the follow-up sequence for this prospect.
+                cancelled = db.cancel_pending_drafts_for(
+                    int(prospect["id"]), reason="reply_received"
+                )
+                if cancelled:
+                    logger.info(
+                        "cancelled %d pending draft(s) for prospect %d (reply received)",
+                        cancelled, prospect["id"],
+                    )
+
+                db.set_status(int(prospect["id"]), "replied")
+
             db.log_action(
                 int(prospect["id"]),
-                "reply",
+                "reply_stale" if stale else "reply",
                 None,
                 external_id,
                 False,
@@ -196,11 +220,6 @@ def poll_once(
                 # fall back to the plain notification so the user still sees
                 # the reply landed.
                 draft_pushed = False
-                stale = _is_stale(m.sent_at)
-                if stale:
-                    logger.info(
-                        "inbound for prospect %d is %s — recording it but not "
-                        "drafting a reply", prospect["id"], m.sent_at)
                 if draft_replies and inbound_body.strip() and not stale:
                     try:
                         reply_body = drafter("reply", int(prospect["id"]))

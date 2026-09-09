@@ -178,3 +178,96 @@ def test_poll_skips_drafting_when_disabled(db_env, monkeypatch):
     # No draft pushed, but plain notify happened
     assert fake_tg.drafts_pushed == []
     assert len(fake_tg.replies_notified) == 1
+
+
+@pytest.mark.integration
+def test_stale_inbound_does_not_halt_a_live_sequence(db_env, monkeypatch):
+    """A backlog message must not cancel drafts or flip status.
+
+    The Inbox Scraper is incremental, so its first run against a real account
+    returns months of history — the captured inbox held threads whose last
+    message was 15 months old. The staleness check existed but ran *after* the
+    cancel-and-flip block, so every matching prospect had their live sequence
+    permanently halted by a conversation that ended over a year ago, and
+    nothing downstream could undo it.
+
+    Recorded and notified: yes, both are wanted. Acting on the pipeline: no.
+    """
+    from linkedin_agent import db, poll as poll_mod
+    from linkedin_agent.providers.capabilities import InboundMessage
+
+    pid = db.upsert_prospect(
+        linkedin_url="https://www.linkedin.com/in/stale-backlog",
+        full_name="Stale Backlog",
+        provider_id="ACoSTALE",
+    )
+    with db.connect() as conn:
+        conn.execute("UPDATE prospects SET status='dm_sent' WHERE id=?", (pid,))
+    live_draft = db.enqueue_draft(pid, "dm2", "a live follow-up awaiting approval")
+
+    provider = FakeProvider(inbox=[InboundMessage(
+        external_id="msg-old", prospect_provider_id="ACoSTALE",
+        body="Sure, let's talk next quarter.",
+        sent_at="2025-05-01T10:00:00Z", thread_id="chat-old",
+        is_from_me=False, source="phantombuster")])
+
+    fake_tg = FakeTelegramClient(_cfg())
+    monkeypatch.setattr(poll_mod, "TelegramClient", lambda c: fake_tg)
+
+    def forbidden(*a, **k):
+        raise AssertionError("a 15-month-old message must not be auto-drafted")
+
+    result = poll_mod.poll_once(_cfg(), router=fake_router(provider),
+                                notify=True, drafter=forbidden)
+
+    # Recorded, so dedup and history both work.
+    assert result.new_inbound == 1
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT external_id FROM messages WHERE prospect_id=? AND direction='inbound'",
+            (pid,)).fetchall()
+    assert [r["external_id"] for r in rows] == ["msg-old"]
+
+    # But the live sequence is untouched.
+    assert db.get_prospect(pid)["status"] == "dm_sent"
+    assert db.get_draft(live_draft)["status"] == "pending"
+
+    # Logged distinguishably, and the operator still hears about it.
+    with db.connect() as conn:
+        kinds = [r["kind"] for r in conn.execute(
+            "SELECT kind FROM actions WHERE prospect_id=?", (pid,)).fetchall()]
+    assert "reply_stale" in kinds and "reply" not in kinds
+    assert len(fake_tg.replies_notified) == 1
+
+
+@pytest.mark.integration
+def test_recent_inbound_still_halts_the_sequence(db_env, monkeypatch):
+    """The counterpart: the staleness guard must not disarm normal replies."""
+    from datetime import datetime, timedelta, timezone
+    from linkedin_agent import db, poll as poll_mod
+    from linkedin_agent.providers.capabilities import InboundMessage
+
+    pid = db.upsert_prospect(
+        linkedin_url="https://www.linkedin.com/in/fresh-reply",
+        full_name="Fresh Reply",
+        provider_id="ACoFRESH",
+    )
+    with db.connect() as conn:
+        conn.execute("UPDATE prospects SET status='dm_sent' WHERE id=?", (pid,))
+    live_draft = db.enqueue_draft(pid, "dm2", "a live follow-up awaiting approval")
+
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    provider = FakeProvider(inbox=[InboundMessage(
+        external_id="msg-new", prospect_provider_id="ACoFRESH",
+        body="Interested — what does this look like?",
+        sent_at=yesterday, thread_id="chat-new",
+        is_from_me=False, source="phantombuster")])
+
+    fake_tg = FakeTelegramClient(_cfg())
+    monkeypatch.setattr(poll_mod, "TelegramClient", lambda c: fake_tg)
+
+    poll_mod.poll_once(_cfg(), router=fake_router(provider), notify=True,
+                       drafter=_stub_drafter_ok)
+
+    assert db.get_prospect(pid)["status"] == "replied"
+    assert db.get_draft(live_draft)["status"] == "rejected"
