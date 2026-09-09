@@ -297,13 +297,26 @@ class EvidenceBundle:
         return payload
 
 
-def build_evidence(facts, posts=None, *, transition_is_direct: bool = False) -> EvidenceBundle:
+def build_evidence(facts, posts=None, *, transition_is_direct: bool = False,
+                   messages=None) -> EvidenceBundle:
     """Type everything we hold about one prospect.
 
     `transition_is_direct` comes from the caller because only it knows whether
     the two positions are genuinely consecutive at different employers. A
     transition enters as a VERIFIED_FACT either way -- it is referenceable, and
     it is never evidence of a problem.
+
+    `messages` is what the prospect has written TO US, and it belongs here for
+    the same reason posts do: the doctrine is "only their words", and a message
+    they sent us is as much their own words as a post is. Without it, drafting
+    a reply under the pain gate would reject an answer that engages with a
+    problem the prospect had just described to us in their own message -- the
+    gate exists to stop us diagnosing strangers cold, not to stop us listening.
+
+    Kept as a separate parameter rather than folded into `posts` because the
+    source label reaches the drafter. Telling it a private message was a public
+    post invites "as you posted...", which is a small confident falsehood about
+    a real person -- exactly the class of error this module exists to prevent.
     """
     items: list[Evidence] = []
     unknowns: list[str] = []
@@ -359,9 +372,31 @@ def build_evidence(facts, posts=None, *, transition_is_direct: bool = False) -> 
 
     items.extend(detect_signals([p for p, _ in quotable]))
 
+    # What they wrote to us. Same rules, different provenance — and the
+    # provenance is stated so the drafter cannot call a private message a post.
+    said_to_us = []
+    for message in messages or []:
+        text = (getattr(message, "body", None) or
+                (message.get("body") if isinstance(message, dict) else "") or "")
+        if text.strip():
+            said_to_us.append(text)
+
+    for text in said_to_us:
+        items.append(Evidence(
+            kind=EvidenceKind.OBSERVATION,
+            statement="they wrote this to us",
+            source="their own message to us",
+            detail=" ".join(text.split())[:400],
+        ))
+
+    for found in detect_signals([{"text": t} for t in said_to_us]):
+        found.source = found.source.replace("their own post",
+                                            "their own message to us")
+        items.append(found)
+
     # Name the silence explicitly. Each of these is a gap the drafter has
     # previously filled with invention.
-    if not quotable:
+    if not quotable and not said_to_us:
         unknowns.append("nothing they have written — no posts retrieved")
     if not any(e.licenses_pain_claim for e in items):
         unknowns.append("whether they have any build, tooling or scaling "

@@ -129,7 +129,7 @@ def test_run_cycle_drafts_and_enqueues_dm2(db_env, fake_telegram):
         last_dm_at=(NOW - timedelta(days=5)).isoformat(),
     )
     cfg = type("C", (), {})()   # minimal stand-in; run_followup_cycle doesn't read cfg fields
-    stub_drafter = lambda kind, prospect_id: f"stubbed {kind} body"
+    stub_drafter = lambda kind, prospect_id, evidence=None: f"stubbed {kind} body"
 
     result = followup.run_followup_cycle(cfg, drafter=stub_drafter, telegram=fake_telegram, now=NOW)
 
@@ -153,7 +153,7 @@ def test_run_cycle_auto_ghosts_stale(db_env, fake_telegram):
         last_dm_at=(NOW - timedelta(days=15)).isoformat(),
     )
     cfg = type("C", (), {})()
-    stub_drafter = lambda kind, prospect_id: "should not be called"
+    stub_drafter = lambda kind, prospect_id, evidence=None: "should not be called"
 
     result = followup.run_followup_cycle(cfg, drafter=stub_drafter, telegram=fake_telegram, now=NOW)
 
@@ -178,7 +178,7 @@ def test_run_cycle_skips_already_drafted(db_env, fake_telegram):
 
     cfg = type("C", (), {})()
     drafter_calls: list[str] = []
-    def stub_drafter(kind, prospect_id):
+    def stub_drafter(kind, prospect_id, evidence=None):
         drafter_calls.append(kind)
         return "fresh draft"
 
@@ -203,7 +203,7 @@ def test_run_cycle_dm3_preferred_when_both_could_apply(db_env, fake_telegram):
     )
     cfg = type("C", (), {})()
     result = followup.run_followup_cycle(
-        cfg, drafter=lambda k, p: f"{k} body", telegram=fake_telegram, now=NOW,
+        cfg, drafter=lambda k, p, evidence=None: f"{k} body", telegram=fake_telegram, now=NOW,
     )
     assert result.dm3_enqueued == 1
     assert result.dm2_enqueued == 0

@@ -143,7 +143,7 @@ def test_daily_runs_acceptance_check_and_drafts_dm1_same_cycle(db_env, fake_tele
                    "linkedin_agent.enrichment.build_router"):
         monkeypatch.setattr(target, lambda cfg, **kw: fake_router(provider))
 
-    def stub_drafter(kind, prospect_id, recent_posts=None):
+    def stub_drafter(kind, prospect_id, recent_posts=None, evidence=None):
         return f"stub-{kind} body that meets the minimum length for a draft, padded with extra words to clear the 350-char DM1 minimum. " * 4
 
     cfg = _cfg()

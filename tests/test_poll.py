@@ -50,13 +50,13 @@ def _cfg(**overrides):
     return type("CFG", (), base)()
 
 
-def _stub_drafter_ok(kind, prospect_id, recent_posts=None):
+def _stub_drafter_ok(kind, prospect_id, recent_posts=None, evidence=None):
     """A drafter stub that always succeeds with a fixed reply body."""
     assert kind == "reply", f"poll should call drafter with 'reply', got {kind!r}"
     return "Stub reply — glad you're open. Drop a few time windows."
 
 
-def _stub_drafter_insufficient(kind, prospect_id, recent_posts=None):
+def _stub_drafter_insufficient(kind, prospect_id, recent_posts=None, evidence=None):
     """A drafter stub that raises (simulating INSUFFICIENT_CONTEXT or error)."""
     from linkedin_agent.drafter import DrafterError
     raise DrafterError("INSUFFICIENT_CONTEXT — stub")

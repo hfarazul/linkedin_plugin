@@ -221,7 +221,7 @@ def test_full_reply_workflow_from_a_raw_row(db_env, monkeypatch) -> None:
 
     drafted: list = []
 
-    def drafter(kind, prospect_id, recent_posts=None):
+    def drafter(kind, prospect_id, recent_posts=None, evidence=None):
         drafted.append((kind, prospect_id))
         return "Happy to walk through it — what does your build side look like?"
 

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
-from . import db
+from . import db, evidence_context
 from .config import Config
 
 logger = logging.getLogger("linkedin.followup")
@@ -113,7 +113,11 @@ def is_ghost_candidate(prospect, now: datetime) -> bool:
 # ----- orchestration --------------------------------------------------------
 
 # The drafter signature we depend on. Tests can pass a stub like:
-#   lambda kind, prospect_id, recent_posts=None: "fake draft text"
+#   lambda kind, prospect_id, evidence=None: "fake draft text"
+#
+# `evidence` is not optional in practice even though it has a default: this
+# module always passes it, and a stub that omits the parameter raises TypeError
+# rather than silently drafting without the gates.
 DrafterFn = Callable[..., str]
 
 
@@ -177,7 +181,13 @@ def run_followup_cycle(
             continue
 
         try:
-            body = drafter(kind, int(fresh["id"]))
+            # No posts are fetched on the follow-up path, so the tier is
+            # usually weak — which is the correct, conservative answer for a
+            # nudge to someone who has not responded, not a shortfall to work
+            # around. It is exactly when we know least that the gates matter.
+            body = drafter(kind, int(fresh["id"]),
+                           evidence=evidence_context.build_safely(
+                               kind, int(fresh["id"])))
         except Exception as e:
             logger.warning("drafter failed for prospect %d (%s): %s", fresh["id"], kind, e)
             result.drafts_failed += 1

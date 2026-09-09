@@ -719,12 +719,29 @@ def replace_positions(prospect_id: int, positions: list) -> int:
 
 
 def list_positions(prospect_id: int) -> list[sqlite3.Row]:
-    """Newest first. Positions with no parseable start sort last rather than
-    appearing recent."""
+    """Not-known-to-have-ended first, then newest first within each group.
+    Positions with no parseable start sort last of their group rather than
+    appearing recent.
+
+    This must match the ordering `phantombuster.profile_from_row` applies, and
+    for the same reason: everything downstream reads positions[0] as "where
+    they work now", so a role we have not seen end has to outrank one we have.
+
+    Ordering on start date alone — which this did — put a current role whose
+    date range never parsed behind an ended job that happened to have a
+    readable start. The provider layer was corrected for that; this read path
+    was not, so anything reconstructing a profile from the DB rather than from
+    a live scrape got a former employer at position zero and stated it as a
+    verified fact. Keyed on `ended_at` rather than `is_current` for the same
+    reason as the provider: having parsed an end date is a fact, is_current is
+    an inference that a blank field silently reverses.
+    """
     with connect() as conn:
         cur = conn.execute(
             """SELECT * FROM positions WHERE prospect_id = ?
-               ORDER BY started_at IS NULL, started_at DESC""",
+               ORDER BY ended_at IS NOT NULL,
+                        started_at IS NULL,
+                        started_at DESC""",
             (prospect_id,),
         )
         return list(cur.fetchall())

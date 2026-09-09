@@ -20,7 +20,7 @@ import logging
 from dataclasses import dataclass, field
 
 from . import campaigns as campaigns_mod
-from . import db, safety, send_window
+from . import db, evidence_context, safety, send_window
 from .adapters import get_adapter
 from .config import Config
 from .telegram import TelegramClient, TelegramError
@@ -229,8 +229,11 @@ def run_daily(
             if _has_pending_draft(int(p["id"]), "connect_note"):
                 continue
             try:
+                posts = _fetch_posts_for_draft(adapter, p, cache=posts_cache)
                 body = drafter("connect_note", int(p["id"]),
-                               recent_posts=_fetch_posts_for_draft(adapter, p, cache=posts_cache))
+                               recent_posts=posts,
+                               evidence=evidence_context.build_safely(
+                                   "connect_note", int(p["id"]), posts))
                 consecutive_claude_failures = 0  # success resets the breaker
             except Exception as e:
                 if _is_terminal_drafter_failure(e):
@@ -289,8 +292,11 @@ def run_daily(
             if _has_pending_draft(int(p["id"]), "dm1"):
                 continue
             try:
+                posts = _fetch_posts_for_draft(adapter, p)
                 body = drafter("dm1", int(p["id"]),
-                               recent_posts=_fetch_posts_for_draft(adapter, p))
+                               recent_posts=posts,
+                               evidence=evidence_context.build_safely(
+                                   "dm1", int(p["id"]), posts))
                 consecutive_claude_failures = 0
             except Exception as e:
                 logger.warning("dm1 drafter failed for prospect %d: %s", p["id"], e)

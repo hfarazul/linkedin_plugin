@@ -15,7 +15,7 @@ from linkedin_agent import daily as daily_mod
 
 
 # Stable drafter stub — every test that needs a draft body uses this.
-def _stub_drafter(kind, prospect_id, recent_posts=None):
+def _stub_drafter(kind, prospect_id, recent_posts=None, evidence=None):
     return f"stub-{kind}-{prospect_id}"
 
 
@@ -107,7 +107,7 @@ def test_daily_passes_recent_posts_to_drafter(db_env, fake_telegram):
     cfg = _make_cfg()
 
     captured = []
-    def asserting_drafter(kind, prospect_id, recent_posts=None):
+    def asserting_drafter(kind, prospect_id, recent_posts=None, evidence=None):
         captured.append({"kind": kind, "prospect_id": prospect_id, "posts": recent_posts})
         return f"stub-{kind}"
 
@@ -159,7 +159,7 @@ def test_daily_auto_skips_prospect_on_insufficient_context(db_env, fake_telegram
     pid = _seed_prospect("reacted")
     cfg = _make_cfg()
 
-    def insufficient_context_drafter(kind, prospect_id, recent_posts=None):
+    def insufficient_context_drafter(kind, prospect_id, recent_posts=None, evidence=None):
         raise DrafterError("INSUFFICIENT_CONTEXT — not enough signal to draft")
 
     adapter = get_adapter(cfg)
@@ -193,7 +193,7 @@ def test_daily_does_not_auto_skip_on_transient_drafter_failure(db_env, fake_tele
     pid = _seed_prospect("reacted")
     cfg = _make_cfg()
 
-    def claude_binary_failure_drafter(kind, prospect_id, recent_posts=None):
+    def claude_binary_failure_drafter(kind, prospect_id, recent_posts=None, evidence=None):
         raise DrafterError("claude -p exited 1\nstderr:\n")
 
     adapter = get_adapter(cfg)
@@ -231,7 +231,7 @@ def test_daily_trips_claude_breaker_after_threshold_failures(db_env, fake_telegr
         )
     cfg = _make_cfg()
 
-    def always_fails_drafter(kind, prospect_id, recent_posts=None):
+    def always_fails_drafter(kind, prospect_id, recent_posts=None, evidence=None):
         raise DrafterError("claude -p exited 1\nstderr:\n")
 
     adapter = get_adapter(cfg)

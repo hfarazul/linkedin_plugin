@@ -46,7 +46,7 @@ from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Sequence
 
-from . import db
+from . import db, evidence_context
 from .config import Config
 from .providers import Capability, build_router
 from .telegram import TelegramClient, TelegramError
@@ -287,7 +287,16 @@ def poll_once(
                 draft_pushed = False
                 if draft_replies and inbound_body.strip() and halt and not too_old:
                     try:
-                        reply_body = drafter("reply", int(prospect["id"]))
+                        # The prospect's own messages to us are evidence here,
+                        # and evidence_context includes them for this kind
+                        # only. Without them the pain gate would reject a
+                        # reply that engages with a problem they had just
+                        # described — refusing to listen, not refusing to
+                        # guess.
+                        reply_body = drafter(
+                            "reply", int(prospect["id"]),
+                            evidence=evidence_context.build_safely(
+                                "reply", int(prospect["id"])))
                         draft_id = db.enqueue_draft(
                             int(prospect["id"]), "reply", reply_body,
                         )
