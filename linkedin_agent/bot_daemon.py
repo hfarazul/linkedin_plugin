@@ -302,7 +302,7 @@ def send_draft_via_adapter(cfg: Config, adapter, draft, *, source: str = "cli") 
         db.log_action(pid, "connect", json.dumps({"note": body[:200], "via": source}),
                       api_result, cfg.dry_run)
         if unconfirmed:
-            _log_unconfirmed(pid, kind, source)
+            log_unconfirmed(pid, kind, source)
     elif kind in ("dm1", "dm2", "dm3"):
         safety.check_cap(cfg, "dm")
         if cfg.dry_run:
@@ -316,7 +316,7 @@ def send_draft_via_adapter(cfg: Config, adapter, draft, *, source: str = "cli") 
         db.log_action(pid, "dm", json.dumps({"kind": kind, "via": source}),
                       api_result, cfg.dry_run)
         if unconfirmed:
-            _log_unconfirmed(pid, kind, source)
+            log_unconfirmed(pid, kind, source)
     elif kind == "reply":
         # Replies go out as DMs and count against the DM cap. They do NOT
         # change status (prospect stays 'replied' — we're in active
@@ -331,14 +331,14 @@ def send_draft_via_adapter(cfg: Config, adapter, draft, *, source: str = "cli") 
         db.log_action(pid, "reply_sent", json.dumps({"via": source}),
                       api_result, cfg.dry_run)
         if is_unconfirmed(api_result):
-            _log_unconfirmed(pid, kind, source)
+            log_unconfirmed(pid, kind, source)
     else:
         raise RuntimeError(f"unknown draft kind {kind!r}")
 
     db.set_draft_status(draft["id"], "sent")
 
 
-def _log_unconfirmed(prospect_id: int, kind: str, source: str) -> None:
+def log_unconfirmed(prospect_id: int, kind: str, source: str) -> None:
     """Record that a write went out without delivery confirmation.
 
     Its own action kind rather than a detail buried in the send row, so

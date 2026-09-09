@@ -21,14 +21,18 @@ from __future__ import annotations
 # For each new inbound message we:
 #   1. Look up the prospect by sender provider_id.
 #   2. Insert the inbound row into messages with external_id = unipile id.
-#   3. Flip prospect.status to 'replied'          — recent inbounds only.
+#   3. Flip prospect.status to 'replied'          — replies to us only.
 #   4. Cancel any pending/approved drafts for this prospect (a reply halts
 #      the follow-up sequence — Phase 6's auto-followup respects this).
-#      Recent inbounds only, for the same reason.
+#      Replies to us only, for the same reason.
 #   5. Push a Telegram notification with the excerpt + profile link.
 #
-# Steps 3 and 4 are gated on REPLY_DRAFT_MAX_AGE_DAYS: a backlog message is
-# recorded and notified but must not act on a live pipeline. See _is_stale.
+# Steps 3 and 4 are gated on whether the inbound post-dates our last outbound
+# (see _answers_our_last_outbound). A backlog message is recorded and notified
+# but must not act on a live pipeline. Auto-drafting a reply carries a second,
+# separate gate on age — REPLY_DRAFT_MAX_AGE_DAYS, see _is_stale — because a
+# genuine reply that arrived during a polling gap should halt the sequence
+# without also being answered automatically weeks late.
 #
 # Messages where the sender provider_id doesn't match any prospect we know
 # about are skipped silently — those are random LinkedIn DMs (recruiters, etc.)
@@ -64,6 +68,47 @@ DEFAULT_BATCH = 50
 # The message is still recorded (history and dedup both need it) and the
 # operator is still notified; only the automatic drafting is suppressed.
 REPLY_DRAFT_MAX_AGE_DAYS = int(os.getenv("REPLY_DRAFT_MAX_AGE_DAYS", "30"))
+
+
+def _answers_our_last_outbound(prospect_id: int, sent_at: str | None) -> bool | None:
+    """True if this inbound post-dates the last thing we sent them.
+
+    Age alone is the wrong discriminator for "should this halt the sequence".
+    It cannot tell a 15-month-old backlog thread from a genuine reply that
+    arrived during a gap in polling — and this branch creates exactly such a
+    gap, between the last poll on the old provider and the first on the new
+    one. A reply older than REPLY_DRAFT_MAX_AGE_DAYS is still a reply, and
+    continuing to send DM2 and DM3 at someone who already answered is worse
+    than the backlog problem the age gate was added for.
+
+    Ordering answers it precisely: an inbound newer than our most recent
+    outbound is a response to us whatever its age; one older than everything we
+    sent is history that predates the conversation.
+
+    Returns None when we have never sent them anything, because then there is
+    no outbound to compare against and nothing they could be replying to. The
+    caller falls back to the age gate for that case.
+    """
+    if not sent_at:
+        return None
+    with db.connect() as conn:
+        row = conn.execute(
+            """SELECT MAX(sent_at) AS last_out FROM messages
+                WHERE prospect_id = ? AND direction = 'outbound'""",
+            (prospect_id,)).fetchone()
+    last_out = row["last_out"] if row else None
+    if not last_out:
+        return None
+    try:
+        inbound_at = datetime.fromisoformat(str(sent_at).replace("Z", "+00:00"))
+        outbound_at = datetime.fromisoformat(str(last_out).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if inbound_at.tzinfo is None:
+        inbound_at = inbound_at.replace(tzinfo=timezone.utc)
+    if outbound_at.tzinfo is None:
+        outbound_at = outbound_at.replace(tzinfo=timezone.utc)
+    return inbound_at > outbound_at
 
 
 def _is_stale(sent_at: str | None, *, now: datetime | None = None) -> bool:
@@ -174,24 +219,44 @@ def poll_once(
 
             new_inbound += 1
 
-            # Age is decided BEFORE anything acts on the message. The Inbox
-            # Scraper is incremental, so its first run against a real account
-            # returns the entire backlog — the captured inbox held threads
-            # whose last message was 15 months old. Cancelling drafts and
-            # flipping status on those permanently halts a live sequence
-            # because of a conversation that ended over a year ago, and
-            # nothing later in this loop can undo it.
+            # Decided BEFORE anything acts on the message. The Inbox Scraper is
+            # incremental, so its first run against a real account returns the
+            # entire backlog — the captured inbox held threads whose last
+            # message was 15 months old. Cancelling drafts and flipping status
+            # on those permanently halts a live sequence because of a
+            # conversation that ended over a year ago, and nothing later in
+            # this loop can undo it.
             #
-            # A stale inbound is still recorded and still notified: history and
-            # dedup both need the row, and the operator should see it. What it
-            # does not do is touch the pipeline.
-            stale = _is_stale(m.sent_at)
+            # Ordering decides it where we have an outbound to compare against:
+            # anything newer than our last message to them is a reply and halts
+            # the sequence however old it is. Age is only the fallback, for a
+            # prospect we have never written to — where there is nothing they
+            # could be replying to.
+            #
+            # A backlog inbound is still recorded and still notified: history
+            # and dedup both need the row, and the operator should see it. What
+            # it does not do is touch the pipeline.
+            #
+            # Two separate questions, deliberately not one flag:
+            #
+            #   halt      should this stop the outbound sequence?  Ordering.
+            #   too_old   should we auto-draft a reply to it?      Age.
+            #
+            # They differ for a genuine reply that arrived during a polling
+            # gap. It must halt — chasing someone who already answered is the
+            # worse failure — but auto-drafting a response to a 40-day-old
+            # message is its own embarrassment, and REPLY_DRAFT_MAX_AGE_DAYS
+            # was added for exactly that. Collapsing them into one flag forces
+            # a wrong answer to one of the two.
+            answers_us = _answers_our_last_outbound(int(prospect["id"]), m.sent_at)
+            too_old = _is_stale(m.sent_at)
+            halt = answers_us if answers_us is not None else not too_old
 
-            if stale:
+            if not halt:
                 logger.info(
-                    "inbound for prospect %d dates from %s — recording it, but "
-                    "leaving status and pending drafts alone",
-                    prospect["id"], m.sent_at)
+                    "inbound for prospect %d dates from %s and predates our "
+                    "last message to them — recording it, but leaving status "
+                    "and pending drafts alone", prospect["id"], m.sent_at)
             else:
                 # Halt the follow-up sequence for this prospect.
                 cancelled = db.cancel_pending_drafts_for(
@@ -207,7 +272,7 @@ def poll_once(
 
             db.log_action(
                 int(prospect["id"]),
-                "reply_stale" if stale else "reply",
+                "reply_stale" if not halt else "reply",
                 None,
                 external_id,
                 False,
@@ -220,7 +285,7 @@ def poll_once(
                 # fall back to the plain notification so the user still sees
                 # the reply landed.
                 draft_pushed = False
-                if draft_replies and inbound_body.strip() and not stale:
+                if draft_replies and inbound_body.strip() and halt and not too_old:
                     try:
                         reply_body = drafter("reply", int(prospect["id"]))
                         draft_id = db.enqueue_draft(

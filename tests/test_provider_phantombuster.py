@@ -872,3 +872,39 @@ def test_two_ended_roles_still_order_by_start_date() -> None:
 
     assert [p.company for p in facts.positions] == ["Newer Job", "Older Job"]
     assert not any(p.is_current for p in facts.positions)
+
+
+@pytest.mark.unit
+def test_a_blank_current_date_range_does_not_demote_the_role() -> None:
+    """The case an is_current sort key silently reverses.
+
+    parse_date_range("") returns is_current=False, so keying the sort on
+    is_current dropped a blank current range into the ended group and put a
+    former employer at positions[0] — the exact bug, for exactly the profiles
+    whose fields come back empty. Blank fields are already observed here:
+    linkedinCompanyName arrived empty on a real profile.
+
+    "We parsed an end date" is a fact. is_current is an inference.
+    """
+    from linkedin_agent.providers.phantombuster import profile_from_row
+
+    row = {
+        "linkedinJobTitle": "CTO", "linkedinCompanyName": "NowCorp",
+        "linkedinJobDateRange": "",
+        "linkedinPreviousJobTitle": "Engineer", "previousCompanyName": "OldCorp",
+        "linkedinPreviousJobDateRange": "Jan 2019 - Jan 2022",
+    }
+    assert profile_from_row(row).positions[0].company == "NowCorp"
+
+
+@pytest.mark.unit
+def test_a_missing_current_date_range_does_not_demote_the_role() -> None:
+    """Same gap reached by an absent key rather than an empty string."""
+    from linkedin_agent.providers.phantombuster import profile_from_row
+
+    row = {
+        "linkedinJobTitle": "CTO", "linkedinCompanyName": "NowCorp",
+        "linkedinPreviousJobTitle": "Engineer", "previousCompanyName": "OldCorp",
+        "linkedinPreviousJobDateRange": "Jan 2019 - Jan 2022",
+    }
+    assert profile_from_row(row).positions[0].company == "NowCorp"

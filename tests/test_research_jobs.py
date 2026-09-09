@@ -52,6 +52,12 @@ class FakeJobs:
     def fetch_rows(self, agent_id):
         return list(self._rows)
 
+    def fetch_all_rows(self, agent_id):
+        # The agent's cumulative CSV across every run. Defaults to the same
+        # rows as result.json, so only tests that set `all_rows` exercise the
+        # deduplicated-profile recovery.
+        return list(getattr(self, "all_rows", self._rows))
+
     def close(self):
         pass
 
@@ -357,7 +363,6 @@ def test_job_result_for_a_different_person_is_not_applied(db_env):
     job path did not.
     """
     from linkedin_agent import db, research_jobs
-    from linkedin_agent.providers.base import MalformedResponse
 
     pid = db.upsert_prospect(
         linkedin_url="https://www.linkedin.com/in/the-right-person",
@@ -369,7 +374,7 @@ def test_job_result_for_a_different_person_is_not_applied(db_env):
     job = db.get_job(job_id)
 
     # PROFILE_ROW is somebody else entirely — the previous run's target.
-    with pytest.raises(MalformedResponse, match="not applying it"):
+    with pytest.raises(research_jobs.ResultNotReady, match="not applying it"):
         research_jobs._apply_profile(job, [PROFILE_ROW])
 
     after = db.get_prospect(pid)
@@ -400,9 +405,18 @@ def test_job_result_for_the_requested_person_is_applied(db_env):
 
 
 @pytest.mark.integration
-def test_a_mismatched_result_fails_the_job_rather_than_finishing_it(db_env):
-    """collect() must record the miss as a failure. Marking it finished with a
-    'did not match' summary would leave the prospect looking enriched."""
+def test_a_mismatched_result_defers_rather_than_finishing_or_failing(db_env):
+    """A lagging result file and a wrong target are indistinguishable now.
+
+    A container can report finished before result.json lands in S3, so an early
+    read serves the previous run's rows. fetch_profile absorbs that by sleeping
+    through RESULT_SETTLE_ATTEMPTS; a cron collect must not sleep, so the job
+    stays open and is re-checked on the next tick.
+
+    What is unconditional either way is that the row we were handed is not
+    written. Refusing to write is the safe half; deciding the target is
+    permanently wrong is the half that needs patience.
+    """
     from linkedin_agent import db, research_jobs
 
     pid = db.upsert_prospect(
@@ -415,9 +429,67 @@ def test_a_mismatched_result_fails_the_job_rather_than_finishing_it(db_env):
                            container_id="c1")
 
     jobs = FakeJobs(status="finished", rows=[PROFILE_ROW])
-    router = _router(FakeAsyncProvider(jobs))
-    result = research_jobs.collect(_cfg(), router=router)
+    result = research_jobs.collect(_cfg(), router=_router(FakeAsyncProvider(jobs)))
 
-    assert result.failed == 1 and result.finished == 0
-    assert db.get_job(job_id)["status"] == "failed"
+    assert result.still_running == 1
+    assert result.finished == 0 and result.failed == 0
+    assert db.get_job(job_id)["status"] == "running"
     assert db.get_prospect(pid)["enriched_at"] is None
+
+
+@pytest.mark.integration
+def test_a_result_that_never_settles_eventually_times_out(db_env):
+    """Deferring must not mean retrying forever. The existing poll ceiling
+    applies, so a genuinely wrong target is abandoned rather than relaunched
+    every tick for good."""
+    from linkedin_agent import db, research_jobs
+
+    pid = db.upsert_prospect(
+        linkedin_url="https://www.linkedin.com/in/the-right-person",
+        full_name="Right Person",
+        provider_id="ACoRIGHTPERSON000000",
+    )
+    job_id = db.create_job(Capability.PROFILE.value, "phantombuster",
+                           prospect_id=pid, target="ACoRIGHTPERSON000000",
+                           container_id="c1")
+    with db.connect() as conn:
+        conn.execute("UPDATE research_jobs SET attempts = ? WHERE id = ?",
+                     (research_jobs.MAX_POLL_ATTEMPTS, job_id))
+
+    jobs = FakeJobs(status="finished", rows=[PROFILE_ROW])
+    result = research_jobs.collect(_cfg(), router=_router(FakeAsyncProvider(jobs)))
+
+    assert result.timed_out == 1
+    assert db.get_job(job_id)["status"] == "timeout"
+    assert db.get_prospect(pid)["enriched_at"] is None
+
+
+@pytest.mark.integration
+def test_a_deduplicated_profile_is_served_from_the_cumulative_results(db_env):
+    """The Phantom skips a profile it has already scraped, exiting in seconds
+    and leaving the previous run's result.json. The row is still in the agent's
+    cumulative CSV, so a skip is a cache hit rather than a failure — the same
+    recovery fetch_profile makes inline, which the job path had lost."""
+    from linkedin_agent import db, research_jobs
+
+    pid = db.upsert_prospect(
+        linkedin_url="https://www.linkedin.com/in/anjan-b/",
+        full_name="Anjan B",
+        provider_id="ACoJOBTEST0000000000",
+    )
+    job_id = db.create_job(Capability.PROFILE.value, "phantombuster",
+                           prospect_id=pid, target="ACoJOBTEST0000000000",
+                           container_id="c1")
+
+    # result.json holds the PREVIOUS run's person; the cumulative CSV has ours.
+    other = dict(PROFILE_ROW)
+    other["profileUrl"] = "https://www.linkedin.com/in/someone-else/"
+    other["linkedinProfileUrn"] = "ACoSOMEONEELSE000000"
+    jobs = FakeJobs(status="finished", rows=[other])
+    jobs.all_rows = [other, PROFILE_ROW]
+
+    result = research_jobs.collect(_cfg(), router=_router(FakeAsyncProvider(jobs)))
+
+    assert result.finished == 1
+    assert db.get_job(job_id)["status"] == "finished"
+    assert db.get_prospect(pid)["headline"] == "Software Engineer"

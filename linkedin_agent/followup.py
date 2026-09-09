@@ -78,14 +78,27 @@ def is_dm3_due(prospect, now: datetime) -> bool:
 
 def is_ghost_candidate(prospect, now: datetime) -> bool:
     """Mark as ghosted if DM3 has been sent and enough time has passed with
-    no reply. Doesn't touch prospects already flagged with a disposition."""
+    no reply. Doesn't touch prospects already flagged with a disposition.
+
+    Falls back to `last_action_at` when `last_dm_at` is NULL. That combination
+    means the last send could not be confirmed by the provider, which clears
+    the follow-up clock deliberately — we will not chase someone about a
+    message nobody saw arrive.
+
+    Ghosting is the opposite case and must still happen. It sends nothing; it
+    is a bookkeeping disposition, and exempting these prospects would leave a
+    class of them sitting in `dm_sent` forever — never chased, never ghosted,
+    and counted as live in every pipeline view, while CLAUDE.md documents
+    ghosting as automatic. For a parked prospect nothing else moves
+    `last_action_at`, so it holds the dispatch time.
+    """
     if prospect["disposition"]:
         return False
     if prospect["status"] == "replied":
         return False
     if prospect["dm_count"] < 3:
         return False
-    age = _age_days(prospect["last_dm_at"], now)
+    age = _age_days(prospect["last_dm_at"] or prospect["last_action_at"], now)
     return age is not None and age >= GHOST_DELAY_DAYS
 
 

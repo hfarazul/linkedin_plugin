@@ -290,6 +290,16 @@ _PROSPECT_COLUMNS = {
     "pronoun":                   "TEXT",     # "She/Her", "He/Him", etc.
     "last_post_at":              "TEXT",     # ISO timestamp of most recent post
     "enriched_at":               "TEXT",     # when enrichment last ran
+    # When we last asked whether this invite had been accepted — set on every
+    # check, accepted or not.
+    #
+    # The "or not" is the whole point. Acceptance checks are bounded per cycle
+    # now that each one costs a profile re-scrape, and the candidate list was
+    # ordered by last_action_at, which a still-pending check does not touch.
+    # So the same head-of-list invites were re-checked every hour and the rest
+    # were never reached at all. Ordering on this column instead makes the
+    # bound a rotation rather than a permanent cut.
+    "acceptance_checked_at":     "TEXT",
 }
 
 _MESSAGE_COLUMNS = {
@@ -411,9 +421,15 @@ def set_disposition(prospect_id: int, disposition: str) -> None:
         )
 
 
-def record_dm(prospect_id: int, *, confirmed: bool = True) -> None:
+def record_dm(prospect_id: int, *, confirmed: bool) -> None:
     """Called after a DM is dispatched. Always bumps dm_count; sets last_dm_at
     only when delivery was actually confirmed.
+
+    `confirmed` is required rather than defaulting to True. A default would
+    hand the old, wrong behaviour to every call site that was not migrated,
+    silently — which is exactly what happened to `linkedin dm` when this
+    argument was first introduced with a default. The compiler cannot catch a
+    keyword default; it can catch a missing required one.
 
     The two columns answer different questions, and an unconfirmed send needs
     different answers to each:

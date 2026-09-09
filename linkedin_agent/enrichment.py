@@ -173,6 +173,14 @@ def check_acceptances(
         p for p in db.list_prospects(status="connection_sent", limit=10_000)
         if p["provider_id"]
     ]
+    # Least-recently-checked first, never-checked before checked. When `limit`
+    # bounds the batch this is what makes it a rotation: list_prospects orders
+    # by last_action_at, which a still-pending check leaves untouched, so
+    # slicing that order re-checked one fixed head every cycle and starved the
+    # tail. It also happened to favour the NEWEST invites — the ones least
+    # likely to have been accepted yet.
+    candidates.sort(key=lambda p: (p["acceptance_checked_at"] is not None,
+                                   p["acceptance_checked_at"] or ""))
     if limit is not None:
         candidates = candidates[:limit]
 
@@ -185,6 +193,14 @@ def check_acceptances(
                 accepted = router.perform(
                     Capability.ACCEPTANCE_CHECK, "check_acceptance",
                     p["provider_id"])
+                # Stamped before the outcome is examined, so a check that came
+                # back "still pending" still moves this prospect to the tail of
+                # the rotation. Stamping only on success would recreate the
+                # starvation this column exists to fix.
+                with db.connect() as conn:
+                    conn.execute(
+                        "UPDATE prospects SET acceptance_checked_at = ? WHERE id = ?",
+                        (db.now(), int(p["id"])))
                 if accepted is None:
                     result.errors += 1
                     result.error_messages.append(f"p={p['id']}: fetch returned None")

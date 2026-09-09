@@ -314,6 +314,8 @@ def connect(prospect_id: int, note: str | None) -> None:
 @click.argument("body")
 def dm(prospect_id: int, body: str) -> None:
     """Send a direct message (must already be connected)."""
+    from .bot_daemon import log_unconfirmed
+    from .providers.router_adapter import is_unconfirmed
     cfg, adapter = _adapter()
     try:
         safety.check_cap(cfg, "dm")
@@ -328,12 +330,25 @@ def dm(prospect_id: int, body: str) -> None:
         result = adapter.send_dm(p["linkedin_url"], body)
         db.log_action(prospect_id, "dm", body[:200], result, False)
         db.record_message(prospect_id, "outbound", body)
-        # Bump dm_count + last_dm_at so follow-up scheduler picks this up at
-        # the right cadence — same as the bot daemon's approval-send path.
-        db.record_dm(prospect_id)
+        # Bump dm_count + last_dm_at so the follow-up scheduler picks this up
+        # at the right cadence — same as the bot daemon's approval-send path,
+        # including its treatment of a send the provider could not confirm.
+        # This is the path CLAUDE.md documents for recrafted replies, so it is
+        # reached by hand on exactly the nuanced cases.
+        unconfirmed = is_unconfirmed(result)
+        db.record_dm(prospect_id, confirmed=not unconfirmed)
         db.set_status(prospect_id, "dm_sent")
+        if unconfirmed:
+            log_unconfirmed(prospect_id, "dm", "cli")
         safety.human_delay(cfg)
-        console.print(f"[green]✓[/green] DM sent to {p['full_name'] or p['linkedin_url']}")
+        if unconfirmed:
+            console.print(
+                f"[yellow]?[/yellow] DM dispatched to "
+                f"{p['full_name'] or p['linkedin_url']}, but the provider "
+                f"could not confirm delivery — follow-ups are parked. "
+                f"Check LinkedIn.")
+        else:
+            console.print(f"[green]✓[/green] DM sent to {p['full_name'] or p['linkedin_url']}")
     finally:
         adapter.close()
 

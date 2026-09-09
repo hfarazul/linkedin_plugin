@@ -210,19 +210,24 @@ def profile_from_row(row: dict) -> ProfileFacts:
             raw={k: row.get(k) for k in (title_key, range_key, company_key)},
         ))
 
-    # Current roles first, then newest-first within each group. Positions with
-    # no parseable start sort last of their group rather than pretending to be
-    # recent.
+    # Not-known-to-have-ended first, then newest-first within each group.
+    # Positions with no parseable start sort last of their group rather than
+    # pretending to be recent.
     #
-    # `is_current` has to lead. Sorting on start_date alone put a current role
-    # whose date range did not parse ("- Present", a localised month, a blank)
-    # behind an ended job that happened to have a readable start, so
-    # positions[0] was a former employer. Everything downstream treats
-    # positions[0] as where the person works now: build_evidence states it as
-    # a VERIFIED_FACT, and the email then tells a stranger they work somewhere
-    # they left. An unparseable date is missing information about a job we
-    # know is current; it is not evidence that the job is old.
-    positions.sort(key=lambda p: (p.is_current, p.start_date or ""), reverse=True)
+    # Sorting on start_date alone put a role we had not seen end behind an
+    # ended job that happened to have a readable start, so positions[0] was a
+    # former employer. Everything downstream treats positions[0] as where the
+    # person works now: build_evidence states it as a VERIFIED_FACT, and the
+    # email then tells a stranger they work somewhere they left.
+    #
+    # The key is `end_date is None`, not `is_current`. "We parsed an end date"
+    # is a fact; is_current is an inference, and a falsy range silently
+    # reverses it — parse_date_range("") returns is_current=False, so a blank
+    # current range dropped into the ended group and reintroduced the bug for
+    # exactly the profiles whose fields arrive empty. Blank fields are already
+    # observed here: linkedinCompanyName came back empty on a real profile.
+    positions.sort(key=lambda p: (p.end_date is None, p.start_date or ""),
+                   reverse=True)
 
     return ProfileFacts(
         provider_id=extract_provider_id(row.get("linkedinProfileUrn")

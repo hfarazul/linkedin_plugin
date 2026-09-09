@@ -417,9 +417,13 @@ _CLAUDE_FAILURE_BREAKER_THRESHOLD = 3
 # the run cannot finish before the next one starts.
 #
 # Four is the ceiling that keeps the worst case (4 x ~320s) inside the hour
-# with room for the rest of the cycle. Invites are not missed, only deferred:
-# `list_prospects` orders by last_action_at DESC NULLS LAST and a detected
-# accept leaves the queue, so successive ticks work through the backlog.
+# with room for the rest of the cycle.
+#
+# Invites are deferred rather than missed, but only because check_acceptances
+# orders candidates by `acceptance_checked_at` ascending and stamps that column
+# on every check, accepted or not. Slicing the default ordering instead — which
+# is what this first did — re-checked one fixed head of the list every hour and
+# never reached the tail at all. The bound is only safe with the rotation.
 #
 # The real answer is routing acceptance checks through research_jobs like
 # profile scrapes, so the cron submits and collects instead of blocking. That

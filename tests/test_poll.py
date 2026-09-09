@@ -271,3 +271,94 @@ def test_recent_inbound_still_halts_the_sequence(db_env, monkeypatch):
 
     assert db.get_prospect(pid)["status"] == "replied"
     assert db.get_draft(live_draft)["status"] == "rejected"
+
+
+@pytest.mark.integration
+def test_a_genuine_reply_halts_the_sequence_however_old_it_is(db_env, monkeypatch):
+    """Age cannot tell a backlog thread from a reply that arrived in a gap.
+
+    This branch creates exactly such a gap — between the last poll on the old
+    provider and the first on the new one. A reply older than
+    REPLY_DRAFT_MAX_AGE_DAYS is still a reply, and continuing to send DM2 and
+    DM3 at someone who already answered is worse than the backlog problem the
+    age gate was added for.
+
+    Ordering discriminates precisely: this inbound post-dates our last outbound,
+    so it is a response to us whatever its age.
+    """
+    from datetime import datetime, timedelta, timezone
+    from linkedin_agent import db, poll as poll_mod
+    from linkedin_agent.providers.capabilities import InboundMessage
+
+    pid = db.upsert_prospect(
+        linkedin_url="https://www.linkedin.com/in/late-reply",
+        full_name="Late Reply",
+        provider_id="ACoLATEREPLY",
+    )
+    with db.connect() as conn:
+        conn.execute("UPDATE prospects SET status='dm_sent' WHERE id=?", (pid,))
+    live_draft = db.enqueue_draft(pid, "dm2", "a live follow-up awaiting approval")
+
+    now = datetime.now(timezone.utc)
+    # We wrote to them 50 days ago; they answered 40 days ago. Both are past
+    # the 30-day auto-draft threshold, but the ordering is unambiguous.
+    db.record_message(pid, "outbound", "our dm1",
+                      sent_at=(now - timedelta(days=50)).isoformat())
+    provider = FakeProvider(inbox=[InboundMessage(
+        external_id="msg-late", prospect_provider_id="ACoLATEREPLY",
+        body="Sorry for the slow reply — yes, interested.",
+        sent_at=(now - timedelta(days=40)).isoformat(), thread_id="chat-late",
+        is_from_me=False, source="phantombuster")])
+
+    fake_tg = FakeTelegramClient(_cfg())
+    monkeypatch.setattr(poll_mod, "TelegramClient", lambda c: fake_tg)
+
+    def forbidden(*a, **k):
+        raise AssertionError("a 40-day-old message must not be auto-drafted")
+
+    poll_mod.poll_once(_cfg(), router=fake_router(provider), notify=True,
+                       drafter=forbidden)
+
+    # Halted: they answered, so stop chasing them.
+    assert db.get_prospect(pid)["status"] == "replied"
+    assert db.get_draft(live_draft)["status"] == "rejected"
+    # But not auto-answered 40 days late — that gate is separate and still age.
+    assert len(fake_tg.replies_notified) == 1
+    assert fake_tg.drafts_pushed == []
+
+
+@pytest.mark.integration
+def test_backlog_older_than_our_outreach_still_leaves_the_pipeline_alone(db_env, monkeypatch):
+    """The counterpart: an inbound predating everything we sent is history."""
+    from datetime import datetime, timedelta, timezone
+    from linkedin_agent import db, poll as poll_mod
+    from linkedin_agent.providers.capabilities import InboundMessage
+
+    pid = db.upsert_prospect(
+        linkedin_url="https://www.linkedin.com/in/old-thread",
+        full_name="Old Thread",
+        provider_id="ACoOLDTHREAD",
+    )
+    with db.connect() as conn:
+        conn.execute("UPDATE prospects SET status='dm_sent' WHERE id=?", (pid,))
+    live_draft = db.enqueue_draft(pid, "dm2", "a live follow-up awaiting approval")
+
+    now = datetime.now(timezone.utc)
+    # We wrote to them last week; the inbound is from a conversation a year
+    # before that, surfaced by the scraper's first full-backlog run.
+    db.record_message(pid, "outbound", "our dm1",
+                      sent_at=(now - timedelta(days=7)).isoformat())
+    provider = FakeProvider(inbox=[InboundMessage(
+        external_id="msg-ancient", prospect_provider_id="ACoOLDTHREAD",
+        body="Thanks, Zakaur",
+        sent_at=(now - timedelta(days=400)).isoformat(), thread_id="chat-ancient",
+        is_from_me=False, source="phantombuster")])
+
+    fake_tg = FakeTelegramClient(_cfg())
+    monkeypatch.setattr(poll_mod, "TelegramClient", lambda c: fake_tg)
+
+    poll_mod.poll_once(_cfg(), router=fake_router(provider), notify=True,
+                       drafter=_stub_drafter_ok)
+
+    assert db.get_prospect(pid)["status"] == "dm_sent"
+    assert db.get_draft(live_draft)["status"] == "pending"

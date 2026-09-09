@@ -580,3 +580,68 @@ def test_a_confirmed_send_still_starts_the_clock(db_env):
     row = db.get_prospect(pid)
     assert row["dm_count"] == 1
     assert row["last_dm_at"] is not None
+
+
+@pytest.mark.integration
+def test_the_cli_dm_path_also_parks_an_unconfirmed_send(db_env, monkeypatch):
+    """`linkedin dm` is a second send path and was left on the old behaviour.
+
+    It is the path CLAUDE.md documents for recrafted replies, so it is reached
+    by hand on exactly the nuanced cases. The cause was a keyword default:
+    `confirmed=True` handed old-and-wrong behaviour to every call site that was
+    not migrated, silently. The argument is required now.
+    """
+    from click.testing import CliRunner
+    from linkedin_agent import cli as cli_mod, db
+
+    pid = db.upsert_prospect(
+        linkedin_url="https://www.linkedin.com/in/cli-unconfirmed",
+        full_name="CLI Unconfirmed")
+
+    cfg = _make_cfg()
+    monkeypatch.setattr(cli_mod, "_adapter", lambda: (cfg, _UnconfirmedAdapter()))
+
+    res = CliRunner().invoke(cli_mod.cli, ["dm", str(pid), "a manual message body"])
+    assert res.exit_code == 0, res.output
+
+    row = db.get_prospect(pid)
+    assert row["dm_count"] == 1
+    assert row["last_dm_at"] is None, "the CLI path started the follow-up clock"
+    with db.connect() as conn:
+        kinds = [r["kind"] for r in conn.execute(
+            "SELECT kind FROM actions WHERE prospect_id=?", (pid,)).fetchall()]
+    assert "send_unconfirmed" in kinds
+
+
+@pytest.mark.unit
+def test_record_dm_will_not_default_to_claiming_delivery() -> None:
+    """The defect above was a default, so the fix is the absence of one."""
+    import inspect
+    from linkedin_agent import db
+
+    param = inspect.signature(db.record_dm).parameters["confirmed"]
+    assert param.default is inspect.Parameter.empty
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+
+
+@pytest.mark.integration
+def test_an_unconfirmed_final_dm_is_still_eventually_ghosted(db_env):
+    """Clearing the follow-up clock must not also exempt a prospect from
+    ghosting. Ghosting sends nothing — it is bookkeeping — and without it these
+    sit in dm_sent forever, counted as live in every pipeline view."""
+    from datetime import datetime, timedelta, timezone
+    from linkedin_agent import db
+    from linkedin_agent.followup import is_ghost_candidate
+
+    pid = db.upsert_prospect(
+        linkedin_url="https://www.linkedin.com/in/parked-forever",
+        full_name="Parked Forever")
+    long_ago = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE prospects SET status='dm_sent', dm_count=3, "
+            "last_dm_at=NULL, last_action_at=? WHERE id=?", (long_ago, pid))
+
+    row = db.get_prospect(pid)
+    assert row["last_dm_at"] is None
+    assert is_ghost_candidate(row, datetime.now(timezone.utc))

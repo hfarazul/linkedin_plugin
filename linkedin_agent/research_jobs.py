@@ -64,7 +64,19 @@ class CollectResult:
 # --------------------------------------------------------------- handlers
 
 
-def _apply_profile(job, rows: list) -> str:
+class ResultNotReady(RuntimeError):
+    """The container finished but its rows are not the ones we asked for yet.
+
+    A container can report finished before result.json has landed in S3, so an
+    early read serves the previous run's rows. `fetch_profile` absorbs that by
+    sleeping through RESULT_SETTLE_ATTEMPTS; a cron collect must not sleep, so
+    the async equivalent is to leave the job running and look again next tick.
+    `bump_job_attempts` bounds it — MAX_POLL_ATTEMPTS still applies, so a
+    result that never settles times out rather than retrying forever.
+    """
+
+
+def _apply_profile(job, rows: list, provider=None) -> str:
     """Persist a finished profile scrape onto the prospect.
 
     Reuses enrichment's field mapping so a job-applied profile and an inline
@@ -97,14 +109,37 @@ def _apply_profile(job, rows: list) -> str:
             f"job {job['id']} has no target to match the result against",
             provider=job["provider"])
     facts = _match_requested(rows, target)
+
+    if facts is None and provider is not None:
+        # The Phantom deduplicates: on a profile it has already scraped it
+        # exits in seconds without scraping and leaves the previous run's
+        # result.json. The row is still in the agent's cumulative CSV, so a
+        # skip becomes a cache hit instead of a failure — the same recovery
+        # fetch_profile makes inline, which the job path was missing.
+        try:
+            cached = provider.jobs().fetch_all_rows(
+                provider._require_agent(Capability(job["capability"])))
+        except Exception:
+            cached = []
+        facts = _match_requested(cached, target) if cached else None
+        if facts is not None:
+            logger.info("job %d served from the agent's cumulative results; "
+                        "the Phantom skipped this profile as already done",
+                        job["id"])
+
     if facts is None:
         returned = ", ".join(
             str(r.get("linkedinProfileSlug") or r.get("profileUrl") or "?")
             for r in rows[:3])
-        raise MalformedResponse(
+        # A lagging result file and a genuinely wrong target look identical at
+        # this instant, and only time separates them. Retry on a later tick
+        # rather than failing now — but never write the row we were handed.
+        # Refusing to write is the safe half and is unconditional; deciding
+        # it is permanently wrong is the half that needs patience.
+        raise ResultNotReady(
             f"job {job['id']} asked for {target!r} but the result held "
-            f"{returned!r} — not applying it to prospect {prospect_id}",
-            provider=job["provider"])
+            f"{returned!r} — not applying it to prospect {prospect_id}; "
+            f"will re-check on the next tick")
     fields = _facts_to_db_fields(facts)
     fields["enriched_at"] = db.now()
     sets = ", ".join(f"{k} = ?" for k in fields)
@@ -119,7 +154,9 @@ def _apply_profile(job, rows: list) -> str:
     return f"applied {len(fields)} fields, {stored} positions"
 
 
-# capability -> (agent argument builder, result handler)
+# capability -> result handler, called as handler(job, rows, provider).
+# The provider is passed so a handler can reach the same recovery paths the
+# inline call has — re-reading an agent's cumulative results, for instance.
 HANDLERS = {
     Capability.PROFILE.value: _apply_profile,
 }
@@ -277,7 +314,21 @@ def _collect_one(job, router, result: CollectResult) -> None:
         result.failed += 1
         return
 
-    summary = handler(job, rows)
+    try:
+        summary = handler(job, rows, provider)
+    except ResultNotReady as e:
+        # Leave the job open. attempts was already bumped above, so the
+        # MAX_POLL_ATTEMPTS ceiling still applies and a result that never
+        # settles times out instead of being retried forever.
+        if attempts >= MAX_POLL_ATTEMPTS:
+            db.finish_job(job["id"], status="timeout", error=str(e)[:300])
+            result.timed_out += 1
+            logger.warning("job %d abandoned: %s", job["id"], e)
+        else:
+            result.still_running += 1
+            logger.info("job %d: %s", job["id"], e)
+        return
+
     db.finish_job(job["id"], status="finished", result_summary=summary)
     result.finished += 1
     logger.info("job %d finished: %s", job["id"], summary)
