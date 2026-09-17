@@ -260,3 +260,83 @@ def test_a_clean_weak_email_passes_every_gate(monkeypatch) -> None:
     _stub_drafter(monkeypatch, [CLEAN])
     bundle = build_evidence(WEAK_FACTS, [], transition_is_direct=True)
     assert d.draft("email1", 1, evidence=bundle.as_dict()) == CLEAN
+
+
+# ===================== unsupported seniority claims ========================
+
+@pytest.mark.unit
+@pytest.mark.parametrize("body", [
+    "We bring two decades of experience across sectors and leadership profiles.",
+    "Our team has 20 years of combined experience shipping this.",
+    "Decades of experience working with leadership profiles like yours.",
+    "We collectively bring more than twenty years to a build like this.",
+])
+def test_an_invented_seniority_claim_is_rejected(body) -> None:
+    """A GTM brief asked the drafter to "lead with the authority of two decades
+    of experience". No source states any collective figure — theagenticlabs.ai
+    says "15+ Skilled Developers" and "10+ Industries Served" and gives no
+    years at all — so the claim is an invented credential.
+
+    It needs its own gate because the brief-vocabulary check structurally
+    cannot see it. That check rejects an unknown proper noun, an unknown DIGIT,
+    or a practice assertion built from unknown words; "two decades of
+    experience" spelled out is none of the three.
+    """
+    assert d._contains_unsupported_authority(body) is not None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("body", [
+    "We are 15+ developers across 10+ industries.",
+    "We built Evergrow — seven agents running the content pipeline.",
+    "Ritik is ex-Amazon; the rest of the bench are engineers from the IITs.",
+])
+def test_grounded_scale_claims_are_not_touched(body) -> None:
+    """The gate bans an unsupported credential, not the idea of being
+    experienced. Everything published and checkable stays sayable."""
+    assert d._contains_unsupported_authority(body) is None
+
+
+@pytest.mark.unit
+def test_the_brief_does_not_whitelist_the_phrases_it_forbids() -> None:
+    """The brief is also the approved vocabulary, so writing a forbidden
+    phrase into it in order to forbid it would make the phrase sayable.
+
+    The anti-claim is therefore worded without the literal phrasings, and the
+    phrasings live in the deny-list instead. If someone later spells them out
+    in the brief, this fails — which is the point.
+    """
+    brief = d._shared_positioning().lower()
+    for phrase in ("two decades", "20 years", "twenty years"):
+        assert phrase not in brief, (
+            f"{phrase!r} is written in the brief, which whitelists its "
+            f"vocabulary and defeats the deny-list")
+
+
+# ===================== vocabulary tokenisation =============================
+
+@pytest.mark.unit
+def test_a_term_used_only_at_the_end_of_a_sentence_is_still_approved() -> None:
+    """Whether a word ended a sentence says nothing about whether we approved it.
+
+    The token class has to allow "." and "-" inside a word ("ai-engineering",
+    "co-founder"), which also swallowed the full stop closing a sentence. The
+    brief's "engineers from the IITs." entered the vocabulary as "iits." and
+    never matched the "IITs" a draft wrote, so a perfectly grounded claim was
+    rejected as invented.
+    """
+    grounding = CortivoGrounding("We hire engineers from the IITs. They ship.")
+
+    assert "iits" in grounding.vocabulary
+    assert ungrounded_cortivo_claim(
+        "We work with engineers from the IITs.", grounding) is None
+
+
+@pytest.mark.unit
+def test_stripping_trailing_punctuation_keeps_compounds_intact() -> None:
+    """The strip must not damage a hyphenated or dotted term mid-word."""
+    grounding = CortivoGrounding("We are a small AI-engineering studio, e.g. agents.")
+
+    assert "ai-engineering" in grounding.vocabulary
+    assert ungrounded_cortivo_claim(
+        "We are a small AI-engineering studio.", grounding) is None

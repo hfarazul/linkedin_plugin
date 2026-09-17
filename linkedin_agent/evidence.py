@@ -477,7 +477,18 @@ class CortivoGrounding:
         joined = " ".join(b or "" for b in briefs)
         self.text = joined
         low = joined.lower()
-        self.vocabulary = set(re.findall(r"[a-z0-9][a-z0-9'+.-]*", low))
+        # Trailing punctuation is stripped, because the token class has to
+        # allow "." and "-" INSIDE a word — "ai-engineering", "co-founder",
+        # "e.g." — and that also swallows the full stop at the end of a
+        # sentence. So a term the brief happens to use only sentence-finally
+        # entered the vocabulary as "iits." and never matched the "IITs" a
+        # draft actually wrote, which got a perfectly grounded claim rejected
+        # as invented. Whether a word ended a sentence says nothing about
+        # whether we approved it.
+        self.vocabulary = {
+            token.rstrip(".-'")
+            for token in re.findall(r"[a-z0-9][a-z0-9'+.-]*", low)
+        }
         # Numbers written any way the brief writes them.
         self.numbers = set(re.findall(r"\d+", low))
 

@@ -248,6 +248,40 @@ _FILLER_TELLS = (
 _normalise_quotes = evidence_mod.normalise_quotes
 
 
+# Seniority claims about US that no source supports.
+#
+# The GTM brief asked the drafter to "lead with the authority of two decades of
+# experience". Neither theagenticlabs.ai nor the approved brief states any total
+# for the team — the site says "15+ Skilled Developers" and "10+ Industries
+# Served" and gives no years figure at all.
+#
+# `ungrounded_cortivo_claim` cannot catch this, and that is structural rather
+# than an oversight. It rejects three shapes: a proper noun absent from the
+# brief, a DIGIT absent from the brief, and a practice assertion built from
+# unknown words. "Two decades of experience across sectors" is none of them —
+# spelled out, it carries no digits at all.
+#
+# So it gets the mechanism that already works for phrasings that must simply
+# never ship: a literal deny-list, matched like a spam tell. Narrow on purpose.
+# It bans an unsupported *credential*, not the idea of being experienced —
+# "15+ developers across 10+ industries" is citable and encouraged.
+_AUTHORITY_TELLS = (
+    "two decades", "2 decades", "20 years", "twenty years",
+    "decades of experience", "years of combined experience",
+    "years of collective experience", "combined experience of",
+    "collectively bring", "collective experience spanning",
+)
+
+
+def _contains_unsupported_authority(body: str) -> str | None:
+    """Return the unsupported seniority claim about us, or None if clean."""
+    low = _normalise_quotes(body.lower())
+    for phrase in _AUTHORITY_TELLS:
+        if phrase in low:
+            return phrase
+    return None
+
+
 def _contains_filler(body: str) -> str | None:
     """Return the recycled template phrase, or None if clean."""
     low = _normalise_quotes(body.lower())
@@ -589,7 +623,7 @@ def _shared_positioning() -> str:
     would authorise yesterday's facts.
     """
     try:
-        return campaigns_mod.brief_path_for("_cortivo").read_text(
+        return campaigns_mod.brief_path_for("_agentic_labs").read_text(
             encoding="utf-8", errors="replace")
     except (OSError, AttributeError):
         # No brief means nothing is grounded, so every specific claim about us
@@ -798,6 +832,26 @@ def draft(
                     f"not argue for relevance — ask about it."
                 )
                 continue
+
+        # Seniority claims about US. Checked before the brief-vocabulary gate
+        # because that gate structurally cannot see this one: a spelled-out
+        # credential carries no digits and no proper noun, so there is nothing
+        # for it to reject.
+        boast = _contains_unsupported_authority(body)
+        if boast:
+            _record(attempts_out, attempt, "rejected",
+                    "unsupported_authority_claim", f"{boast!r}")
+            last_failure = f"unsupported authority claim {boast!r} (attempt {attempt})"
+            last_body_preview = body
+            retry_hint = (
+                f"Your previous attempt claimed {boast!r} about us. No source "
+                f"states any figure for the team's collective seniority — not "
+                f"the site, not the brief — so it is an invented credential. "
+                f"Lead with what is published and checkable instead: 15+ "
+                f"developers, 10+ industries served, and a named case study "
+                f"with its actual result."
+            )
+            continue
 
         # Claims about US. The brief is the only authority for our team,
         # clients, results, timelines and how we work.
