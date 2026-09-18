@@ -39,8 +39,8 @@ FACTS = ProfileFacts(
 CLEAN = ("Hi Ahmed,\n\nWriting off the back of your move to Millennium "
          "Hotels, where you head up operations across the GCC and Iraq.\n\n"
          "I'm Haque, co-founder of Cortivo. We pair a senior engineer with AI "
-         "tooling so a non-technical founder gets the equivalent of a 3-4 "
-         "person eng team for one engineer's cost.\n\nI've no idea whether "
+         "tooling so a non-technical founder can get AI agents built without "
+         "standing up a team in-house.\n\nI've no idea whether "
          "that's relevant to what you're doing — would it be?\n\nBest,\n"
          "Haque\nCortivo")
 
@@ -231,9 +231,9 @@ def test_rejection_fixtures_clear_the_length_floor(body, gate) -> None:
 NO_QUESTION = ("Hi Ahmed,\n\nWriting off the back of your move to Millennium "
                "Hotels, where you head up operations across the GCC and "
                "Iraq.\n\nI'm Haque, co-founder of Cortivo. We pair a senior "
-               "engineer with AI tooling so a non-technical founder gets the "
-               "equivalent of a 3-4 person eng team for one engineer's "
-               "cost.\n\nHappy to be told this is not relevant.\n\nBest,\n"
+               "engineer with AI tooling so a non-technical founder can get "
+               "AI agents built without standing up a team in-house.\n\n"
+               "Happy to be told this is not relevant.\n\nBest,\n"
                "Haque\nCortivo")
 
 

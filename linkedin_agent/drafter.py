@@ -16,6 +16,7 @@ from typing import Sequence
 
 from . import campaigns as campaigns_mod
 from . import evidence as evidence_mod
+from . import senders as senders_mod
 from . import db
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -248,37 +249,79 @@ _FILLER_TELLS = (
 _normalise_quotes = evidence_mod.normalise_quotes
 
 
-# Seniority claims about US that no source supports.
+# Claims about US whose parts are individually approved but whose whole is not.
 #
-# The GTM brief asked the drafter to "lead with the authority of two decades of
-# experience". Neither theagenticlabs.ai nor the approved brief states any total
-# for the team — the site says "15+ Skilled Developers" and "10+ Industries
-# Served" and gives no years figure at all.
+# `ungrounded_cortivo_claim` cannot see any of these, and that is structural
+# rather than an oversight. It rejects three shapes: a proper noun absent from
+# the brief, a DIGIT absent from the brief, and a practice assertion built from
+# unknown words. None of these claims is any of the three:
 #
-# `ungrounded_cortivo_claim` cannot catch this, and that is structural rather
-# than an oversight. It rejects three shapes: a proper noun absent from the
-# brief, a DIGIT absent from the brief, and a practice assertion built from
-# unknown words. "Two decades of experience across sectors" is none of them —
-# spelled out, it carries no digits at all.
+#   * "two decades of experience" spelled out carries no digits at all.
+#   * "a 3-4 person team" carries only digits the brief already approves for
+#     unrelated claims — "Top 3% on Toptal", "4 minutes time-to-itinerary". The
+#     gate checks whether a number is approved, not what it is approved FOR.
 #
-# So it gets the mechanism that already works for phrasings that must simply
-# never ship: a literal deny-list, matched like a spam tell. Narrow on purpose.
-# It bans an unsupported *credential*, not the idea of being experienced —
-# "15+ developers across 10+ industries" is citable and encouraged.
-_AUTHORITY_TELLS = (
-    "two decades", "2 decades", "20 years", "twenty years",
-    "decades of experience", "years of combined experience",
-    "years of collective experience", "combined experience of",
-    "collectively bring", "collective experience spanning",
+# So they get the mechanism that already works for phrasings that must simply
+# never ship: literal deny-lists, matched like a spam tell. Three classes,
+# because they are licensed differently.
+
+# Never licensed, for anyone. No source documents a collective seniority figure
+# for the team, and Manav — who holds the only documented seniority claim —
+# confirmed his is personal, not collective.
+_COLLECTIVE_SENIORITY_TELLS = (
+    "combined experience", "collective experience", "collectively bring",
+    "years of combined", "years of collective", "decades between us",
+    "combined decades",
 )
 
+# Licensed only when the active sender's profile carries `personal_seniority`,
+# and then only when attributed to the sender in the first person. The claim
+# is true of one person; attached to "we" it becomes a claim about the team,
+# which nobody has made.
+_PERSONAL_SENIORITY_TELLS = (
+    "two decades", "2 decades", "20 years", "twenty years",
+    "decades of experience",
+)
 
-def _contains_unsupported_authority(body: str) -> str | None:
-    """Return the unsupported seniority claim about us, or None if clean."""
+# Never licensed. The approved brief marks a fixed engagement length and a
+# team-size equivalence as NOT APPROVED, and the old positioning catalogue
+# stated both — so they are the phrasings a draft is most likely to reach for.
+_UNAPPROVED_ENGAGEMENT_TELLS = (
+    "three or four people", "3-4 person", "3 to 4 person", "team of three or",
+    "one engineer's cost", "six to ten weeks", "6-10 weeks", "6 to 10 weeks",
+    "kickoff to live users",
+)
+
+_FIRST_PERSON_SINGULAR = re.compile(r"(?i)\b(?:i|i've|i'm|i'd|my|me)\b")
+
+
+def _sentence_containing(text: str, phrase: str) -> str:
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
+        if phrase in sentence:
+            return sentence
+    return text
+
+
+def _contains_unsupported_authority(body: str,
+                                    sender: dict | None = None) -> str | None:
+    """Return the unlicensed claim about us, or None if clean.
+
+    `sender` is the payload from `senders.Sender.as_dict()`. Without one, no
+    personal seniority is licensed — the fail-closed direction.
+    """
     low = _normalise_quotes(body.lower())
-    for phrase in _AUTHORITY_TELLS:
+    for phrase in _COLLECTIVE_SENIORITY_TELLS + _UNAPPROVED_ENGAGEMENT_TELLS:
         if phrase in low:
             return phrase
+
+    licensed = bool((sender or {}).get("personal_seniority"))
+    for phrase in _PERSONAL_SENIORITY_TELLS:
+        if phrase not in low:
+            continue
+        if not licensed:
+            return phrase
+        if not _FIRST_PERSON_SINGULAR.search(_sentence_containing(low, phrase)):
+            return f"{phrase} (stated as the team's, not the sender's own)"
     return None
 
 
@@ -318,6 +361,9 @@ class DrafterInput:
     # license a claim, and handing a model such a bag is how "changed jobs"
     # became "has a tooling problem".
     evidence: dict | None = None
+    # Who the message is from: their sign-off, their calendar link, and the
+    # personal credentials only they may claim. See linkedin_agent/senders.py.
+    sender: dict | None = None
 
 
 # -------------------------------------------------------------- prompt loading
@@ -363,8 +409,10 @@ def build_input(
             )
             campaign_row = cur.fetchone()
 
+    campaign_sender = None
     if campaign_row:
         brief = campaigns_mod.load_brief(campaign_row["slug"])
+        campaign_sender = brief.sender
         campaign_ctx = {
             "name": brief.name,
             "target_icp": brief.target_icp,
@@ -402,6 +450,7 @@ def build_input(
         recent_posts=list(recent_posts or []),
         prior_messages=prior,
         evidence=evidence,
+        sender=senders_mod.resolve(campaign_sender).as_dict(),
     )
 
 
@@ -691,8 +740,11 @@ def draft(
     # Claims about us are grounded in the brief, not in anything about the
     # prospect. Both briefs: the campaign's own, and the shared positioning
     # file that holds the team, clients and engagement facts.
+    # The sender's own approved credentials ground claims about them too —
+    # their past employers and projects are real proper nouns for THIS sender.
     grounding = evidence_mod.CortivoGrounding(
-        (inp.campaign or {}).get("brief") or "", _shared_positioning())
+        (inp.campaign or {}).get("brief") or "", _shared_positioning(),
+        (inp.sender or {}).get("credentials") or "")
 
     last_failure: str | None = None
     last_body_preview: str | None = None
@@ -837,19 +889,26 @@ def draft(
         # because that gate structurally cannot see this one: a spelled-out
         # credential carries no digits and no proper noun, so there is nothing
         # for it to reject.
-        boast = _contains_unsupported_authority(body)
+        boast = _contains_unsupported_authority(body, inp.sender)
         if boast:
             _record(attempts_out, attempt, "rejected",
                     "unsupported_authority_claim", f"{boast!r}")
             last_failure = f"unsupported authority claim {boast!r} (attempt {attempt})"
             last_body_preview = body
+            personal = (inp.sender or {}).get("personal_seniority")
             retry_hint = (
-                f"Your previous attempt claimed {boast!r} about us. No source "
-                f"states any figure for the team's collective seniority — not "
-                f"the site, not the brief — so it is an invented credential. "
-                f"Lead with what is published and checkable instead: 15+ "
-                f"developers, 10+ industries served, and a named case study "
-                f"with its actual result."
+                f"Your previous attempt claimed {boast!r}. No source states "
+                f"any figure for the team's collective seniority, and no "
+                f"engagement length or team-size equivalence is approved. "
+                + (f"The sender's own confirmed credential is: {personal!r}. "
+                   f"It is PERSONAL — state it in the first person ('I've "
+                   f"spent...'), never as 'we' or 'our team'. "
+                   if personal else
+                   "This sender has no confirmed seniority claim; do not "
+                   "state one. ")
+                + "Otherwise lead with what is published and checkable: 15+ "
+                  "developers, 10+ industries served, and a named case study "
+                  "with its actual result."
             )
             continue
 

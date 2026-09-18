@@ -133,10 +133,14 @@ Digital), Enrique Barba (Apolo P2P), Sebastien Olive (Olive & Lake).
 Discovery call → a proposal with scope, timeline and pricing → project start.
 Quotes are customised after a free consultation.
 
-> NOT APPROVED — a standard project duration. The site publishes no fixed
-> timeline. The older Cortivo brief said "6–10 weeks kickoff to live users" and
-> "one engineer plus AI tooling equals a 3–4 person team" — neither is
-> published, and neither may be stated until someone re-approves them here.
+> NOT APPROVED — a standard project duration, or any equivalence between our
+> engineers and a larger in-house team. The site publishes neither. The older
+> Cortivo brief stated both as fixed figures; they may not be used until
+> someone re-approves them here.
+>
+> The old figures are deliberately not quoted. Digits written anywhere in this
+> file enter the approved-number set, so quoting a forbidden figure in order
+> to forbid it would make it pass the grounding gate.
 
 # Stack depth (to match a prospect's vocabulary)
 

@@ -19,6 +19,9 @@ class CampaignBrief:
     status: str
     brief: str   # markdown body without frontmatter
     path: Path
+    # Who these messages are from. None defers to OUTREACH_SENDER and then
+    # the default — see linkedin_agent/senders.py.
+    sender: str | None = None
 
 
 def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
@@ -55,6 +58,7 @@ def load_brief(slug: str) -> CampaignBrief:
         status=meta.get("status", "active"),
         brief=body.strip(),
         path=path,
+        sender=meta.get("sender") or None,
     )
 
 

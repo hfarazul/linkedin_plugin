@@ -45,6 +45,7 @@ sys.path.insert(0, str(ROOT))
 # wait for LINKEDIN_DB_PATH the way db/drafter do.
 from linkedin_agent import evidence as evidence_mod  # noqa: E402
 from linkedin_agent import evidence_context  # noqa: E402
+from linkedin_agent import senders as senders_mod  # noqa: E402
 
 TOTAL_STAGES = 12
 
@@ -651,9 +652,13 @@ def _stub_email(facts, bundle) -> str:
         company = (facts.positions[0].company or "").strip()
     company = company or (facts.company_name or "").strip() or "your company"
 
-    cortivo = ("I'm Haque, co-founder of Cortivo — we're a small engineering "
-               "studio that builds custom software for teams who don't want to "
-               "hire a whole in-house team to get something built.")
+    # The stub signs as the resolved sender, like the real drafter does. It
+    # used to hardcode Haque at Cortivo, so a dry run for any other sender
+    # showed an email the real pipeline would never produce.
+    sender = senders_mod.resolve()
+    cortivo = (f"I'm {sender.name}, at {sender.company} — we're a small "
+               f"AI-engineering studio that builds AI agents for teams who "
+               f"would rather not build them in-house.")
     ask = evidence_mod.ask_for(bundle)
 
     if bundle.tier is evidence_mod.Tier.STRONG:
@@ -702,7 +707,7 @@ def _stub_email(facts, bundle) -> str:
             ask,
         ]
 
-    paragraphs.append("Best,\nHaque\nCortivo")
+    paragraphs.append(sender.sign_off)
     return "\n\n".join(paragraphs)
 
 

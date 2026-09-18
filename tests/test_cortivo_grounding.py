@@ -40,9 +40,16 @@ from linkedin_agent.providers.capabilities import Position, ProfileFacts
 @pytest.fixture(scope="module")
 def grounding() -> CortivoGrounding:
     """The real brief. Fabricating one here would test the fixture, not the
-    thing the drafter is actually held to."""
-    return CortivoGrounding(
-        campaigns_mod.brief_path_for("_cortivo").read_text(encoding="utf-8"))
+    thing the drafter is actually held to.
+
+    Loaded through the drafter's own loader rather than by a hardcoded slug.
+    It used to read `_cortivo` directly, and when the company was renamed and
+    the drafter switched to `_agentic_labs`, this fixture kept silently testing
+    the old brief — so a claim the new brief forbids ("6-10 weeks") passed
+    here. Going through `_shared_positioning` means it can never again test a
+    brief the drafter does not use.
+    """
+    return CortivoGrounding(d._shared_positioning())
 
 
 # =========================== ungrounded Cortivo claims =======================
@@ -65,10 +72,9 @@ def test_the_ghazi_sentence_is_rejected(grounding) -> None:
 def test_brief_supported_positioning_passes(grounding) -> None:
     """The gate must not make it impossible to describe the business. This is
     the brief's own positioning, near-verbatim."""
-    body = ("I'm Haque, co-founder of Cortivo. We pair a senior engineer with "
-            "AI tooling so a non-technical founder gets the equivalent of a "
-            "3-4 person eng team for one engineer's cost, typically 6-10 "
-            "weeks from kickoff to live users.")
+    body = ("I'm Haque, co-founder of Agentic Labs. We are a small "
+            "AI-engineering studio of 15+ developers, and we build AI agents "
+            "- Evergrow's seven agents took organic traffic up 7x.")
     assert ungrounded_cortivo_claim(body, grounding) is None
 
 
@@ -176,8 +182,8 @@ WEAK_FACTS = ProfileFacts(
 CLEAN = ("Hi Ahmed,\n\nWriting off the back of your move to Millennium "
          "Hotels, where you head up operations across the GCC and Iraq.\n\n"
          "I'm Haque, co-founder of Cortivo. We pair a senior engineer with AI "
-         "tooling so a non-technical founder gets the equivalent of a 3-4 "
-         "person eng team for one engineer's cost.\n\nI've no idea whether "
+         "tooling so a non-technical founder can get AI agents built without "
+         "standing up a team in-house.\n\nI've no idea whether "
          "that's relevant to what you're doing — would it be?\n\nBest,\n"
          "Haque\nCortivo")
 
@@ -239,8 +245,8 @@ def test_relevance_reasoning_is_allowed_once_a_signal_licenses_it(monkeypatch) -
     body = ("Hi Vincent,\n\nYou posted looking for an Investment Specialist "
             "to work across the investment and sales teams on new fund "
             "launches.\n\nI'm Haque, co-founder of Cortivo. We pair a senior "
-            "engineer with AI tooling so a founder gets the equivalent of a "
-            "3-4 person eng team for one engineer's cost. That's usually "
+            "engineer with AI tooling so a founder can get AI agents built "
+            "without standing up a team in-house. That's usually "
             "where we're useful.\n\nWorth comparing notes?\n\nBest,\nHaque\n"
             "Cortivo")
     _stub_drafter(monkeypatch, [body])
@@ -340,3 +346,48 @@ def test_stripping_trailing_punctuation_keeps_compounds_intact() -> None:
     assert "ai-engineering" in grounding.vocabulary
     assert ungrounded_cortivo_claim(
         "We are a small AI-engineering studio.", grounding) is None
+
+
+# ===================== the brief must not approve what it forbids ==========
+
+@pytest.mark.unit
+def test_a_brief_comment_never_enters_the_approved_vocabulary() -> None:
+    """Comments are notes to editors, never approved claims — and they quote
+    the forbidden thing precisely in order to explain it.
+
+    The Agentic Labs brief's header quoted the parallel-agent incident to
+    explain this gate. Tokenised, that quotation put "parallel-agent" into the
+    approved vocabulary and re-opened the exact sentence the gate exists to
+    stop: it was then rejected only by accident, via an incidental "don't".
+    """
+    grounding = CortivoGrounding(
+        "We build AI agents.\n"
+        "<!-- The drafter once wrote 'a lot of our week is spent in exactly\n"
+        "     that parallel-agent workflow'. Never again. -->")
+
+    assert "parallel-agent" not in grounding.vocabulary
+    assert "workflow" not in grounding.vocabulary
+    assert "agents" in grounding.vocabulary, "the claim outside the comment stays"
+
+
+@pytest.mark.unit
+def test_the_real_brief_does_not_approve_the_incident_it_describes() -> None:
+    """Against the brief the drafter actually loads, the incident's distinctive
+    term must be unapproved — and must be the term the rejection names."""
+    grounding = CortivoGrounding(d._shared_positioning())
+    assert "parallel-agent" not in grounding.vocabulary
+
+    found = ungrounded_cortivo_claim(
+        "I run Cortivo with a co-founder who is ex-Amazon, and a lot of our "
+        "week is spent in exactly that parallel-agent workflow.", grounding)
+    assert found is not None and "parallel-agent" in found
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("figure", ["6", "8"])
+def test_the_brief_does_not_approve_a_figure_it_forbids(figure) -> None:
+    """Digits anywhere in the brief enter the approved-number set, so quoting a
+    forbidden figure to forbid it would approve it. The old engagement length
+    is deliberately not quoted, and no other claim in the brief uses these."""
+    grounding = CortivoGrounding(d._shared_positioning())
+    assert figure not in grounding.numbers

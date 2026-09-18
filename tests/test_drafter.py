@@ -127,7 +127,7 @@ def test_draft_returns_cleaned_body_on_success(monkeypatch, db_env):
         "Your recent post on shipping faster than the market hit a nerve. "
         "I'm at Cortivo — small AI-engineering studio with my co-founder Ritik "
         "(ex-Amazon SDE) and engineers from the IITs. We pair one senior eng "
-        "with AI tooling so non-tech founders ship v1 in 6-10 weeks instead of "
+        "with AI tooling so non-tech founders ship v1 with AI agents instead of "
         "hiring a team. Curious if you've tried that model, or if you're still "
         "riding the in-house hiring path?"
     )
@@ -554,7 +554,7 @@ def test_surveillance_gate_does_not_apply_to_linkedin_kinds(monkeypatch) -> None
         "Saw you moved in March 2026 - congrats on the jump. I'm at Cortivo, a "
         "small AI-engineering studio I run with my co-founder Ritik, ex-Amazon "
         "SDE, alongside engineers from the IITs. We pair one senior engineer "
-        "with AI tooling so a team ships v1 in six to ten weeks rather than "
+        "with AI tooling so a team ships its first AI agents rather than "
         "spending the quarter recruiting for it. What does your build side look "
         "like right now, and is that something you are staffing up or would "
         "rather hand to a pod that already works together?")

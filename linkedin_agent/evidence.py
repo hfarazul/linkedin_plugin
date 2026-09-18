@@ -457,6 +457,9 @@ def phrasing_for(evidence: Evidence) -> tuple[str, str]:
 # rather than in the evidence about the prospect.
 
 
+_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+
+
 class CortivoGrounding:
     """The approved facts about us, and a check against them.
 
@@ -474,7 +477,17 @@ class CortivoGrounding:
     """
 
     def __init__(self, *briefs: str) -> None:
-        joined = " ".join(b or "" for b in briefs)
+        # HTML comments are removed before anything is tokenised. They are
+        # notes to whoever edits a brief — rationale, warnings, the incident
+        # that motivated a rule — and never approved claims. They also
+        # routinely QUOTE the thing we must not say, in order to explain why.
+        #
+        # That quotation approves it. The Agentic Labs brief's header quoted
+        # the parallel-agent incident to explain this very gate, which put
+        # "parallel-agent", "week" and "spent" into the approved vocabulary and
+        # re-opened the exact sentence the gate was built to stop. Nothing in a
+        # comment should ever be sayable because it was written there.
+        joined = " ".join(_HTML_COMMENT.sub(" ", b or "") for b in briefs)
         self.text = joined
         low = joined.lower()
         # Trailing punctuation is stripped, because the token class has to
@@ -764,18 +777,15 @@ _POSITIONING: tuple[Positioning, ...] = (
         "long engagement.",
         "they just shipped or launched something",
     ),
-    Positioning(
-        "small_team_equivalent",
-        "One engineer of ours plus AI tooling is roughly what a founder "
-        "would otherwise hire three or four people to do.",
-        "they are a founder or run the company",
-    ),
-    Positioning(
-        "engagement_shape",
-        "A typical engagement runs six to ten weeks, kickoff to live users.",
-        "there is a concrete project in view -- they raised, or named "
-        "something they are about to build",
-    ),
+    # Two angles were removed here: `small_team_equivalent` ("one engineer of
+    # ours is what a founder would otherwise hire three or four people to do")
+    # and `engagement_shape` ("a typical engagement runs six to ten weeks").
+    # Both stated as fact claims the approved brief marks NOT APPROVED — the
+    # site publishes neither figure — and both were live: the first was chosen
+    # for any founder, the second on any fundraise signal. An angle here is an
+    # instruction to the drafter, so an angle asserting an unapproved claim is
+    # the catalogue telling it to break the brief. Reinstate either only after
+    # the claim is re-approved in campaigns/_agentic_labs.md.
     Positioning(
         "proof_point",
         "Name the closest thing we have actually built, from the brief.",
@@ -831,17 +841,12 @@ def _fits(angle: Positioning, facts, bundle: "EvidenceBundle") -> bool:
         return "shipping_product" in signals
     if angle.name == "custom_software":
         return "build_pain" in signals
-    if angle.name == "engagement_shape":
-        return "fundraise" in signals
     if angle.name == "senior_plus_tooling":
         # Stems, not whole words: "Director of Engineering" is one of the
         # commonest titles there is, and \bengineer\b does not match it.
         return bool(re.search(r"(?i)\b(engineer(?:ing|s)?|developer|technical|"
                               r"cto|software|platform|data|architect|devops|"
                               r"product|build)\b", text))
-    if angle.name == "small_team_equivalent":
-        return bool(re.search(r"(?i)\b(founder|co-?founder|ceo|owner|"
-                              r"managing director)\b", text))
     if angle.name == "proof_point":
         return any(p.search(text) for p in _PROOF_DOMAINS.values())
     return False        # "plain" is the fallback, never a positive match

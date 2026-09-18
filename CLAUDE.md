@@ -1,6 +1,6 @@
 # LinkedIn Outreach Agent — Software Agency Lead-Gen
 
-This project runs LinkedIn outreach for Cortivo, a software agency. **You (Claude Code) are the agent.** The Python package `linkedin_agent` is the toolkit you drive.
+This project runs LinkedIn outreach for Agentic Labs (previously Cortivo), a software agency. **You (Claude Code) are the agent.** The Python package `linkedin_agent` is the toolkit you drive.
 
 Day-to-day, most operations are automated by cron. You're invoked when there's *judgment* to apply: writing a campaign brief, drafting a custom message, replying to an interested prospect.
 
@@ -122,7 +122,16 @@ Check the live view rather than trusting this table — `linkedin providers` rea
 
 Every prospect belongs to a campaign. Campaigns are markdown files under `campaigns/`, and they are the source of truth — DB rows are derived.
 
-`campaigns/_cortivo.md` is the **only authority on what we may claim about ourselves**. The `ungrounded_cortivo_claim` gate checks names, figures and practice claims against it. Editing it changes what the drafter is allowed to say on the next draft.
+`campaigns/_agentic_labs.md` is the **only authority on what we may claim about the company**. The `ungrounded_cortivo_claim` gate checks names, figures and practice claims against it. Editing it changes what the drafter is allowed to say on the next draft. (Agentic Labs was previously Cortivo; `_cortivo.md` is retired.)
+
+It separates **CITABLE** claims (published on theagenticlabs.ai — the prospect can check them) from **APPROVED** ones (true, but unpublished — usable, never linked).
+
+Two traps specific to this file, both of which have already bitten:
+
+- **Writing a forbidden phrase into the brief in order to forbid it approves it.** The brief is also the approved vocabulary and number set, so a quoted "6-10 weeks" whitelists `6` and `10`. HTML comments are stripped before tokenising, precisely because they quote the incidents they explain — but prose outside a comment is not.
+- **Some claims are built entirely from approved parts.** "A 3-4 person team" uses digits approved for unrelated claims (`3` from "Top 3% on Toptal", `4` from "4 minutes"). The number gate checks membership, not meaning, so these live in deny-lists in `drafter.py` instead.
+
+**Claims about a person live in `senders/<slug>.md`, not here.** A sender is chosen by the campaign's `sender:` frontmatter, then `OUTREACH_SENDER`, then the default (`haque`). A sender's `personal_seniority` is licensed only when they send, and only in the first person — Manav's "two decades" is his own, confirmed by him, so "we bring two decades" is rejected even when he sends. A named sender with no profile is a hard error, never a fallback.
 
 To create one: `linkedin campaign create <slug>` scaffolds the file; edit it; `linkedin campaign sync` (or any `daily` run) refreshes the DB.
 
@@ -206,7 +215,7 @@ Grades each result on geography + role + noise exclusion. Exits 0 if keepers ≥
 
 ### Phase 3 — Generate the brief
 
-Write `campaigns/<slug>.md` using `campaigns/_cortivo.md` as canon. Optional frontmatter overrides: `icp_role_required`, `icp_role_excluded`, `icp_geo_required`. Then `campaign sync` and show the rendered brief.
+Write `campaigns/<slug>.md` using `campaigns/_agentic_labs.md` as canon. Optional frontmatter overrides: `icp_role_required`, `icp_role_excluded`, `icp_geo_required`. Then `campaign sync` and show the rendered brief.
 
 ### Phase 4 — First import is small
 
