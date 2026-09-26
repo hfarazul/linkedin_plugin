@@ -142,7 +142,8 @@ class UnipileAdapter(LinkedInAdapter):
 
     # ------------------------------------------------------------------ profile
 
-    def get_recent_posts(self, linkedin_url: str, limit: int = 5) -> list[Post]:
+    def get_recent_posts(self, linkedin_url: str, limit: int = 5, *,
+                         include_reposts: bool = False) -> list[Post]:
         provider_id = self._resolve_provider_id(linkedin_url)
         r = self._client.get(
             f"/users/{provider_id}/posts",

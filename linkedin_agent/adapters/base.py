@@ -26,6 +26,10 @@ class Post:
     author_url: str
     text: str
     posted_at: str | None = None
+    # Someone else's post that the prospect reposted. It tells us what caught
+    # their interest, never what they think — see evidence.build_evidence.
+    # Only a provider asked with include_reposts=True ever sets this.
+    is_repost: bool = False
     # Legacy alias used by older callers — same value as post_id.
 
     @property
@@ -69,8 +73,11 @@ class LinkedInAdapter(ABC):
         raise NotImplementedError("post-search not supported by this adapter")
 
     @abstractmethod
-    def get_recent_posts(self, linkedin_url: str, limit: int = 5) -> list[Post]:
-        """Recent activity for a profile."""
+    def get_recent_posts(self, linkedin_url: str, limit: int = 5, *,
+                         include_reposts: bool = False) -> list[Post]:
+        """Recent activity for a profile: their own posts, and — only when
+        asked — reposts marked `is_repost`. Adapters that cannot tell the two
+        apart ignore the flag and return what they always did."""
 
     @abstractmethod
     def react(self, post: Post, reaction: str = "LIKE") -> str:

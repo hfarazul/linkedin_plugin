@@ -74,6 +74,7 @@ and a named case study with its published result.
 
     - `VERIFIED_FACT` — the provider returned it. You may state it plainly. It is **never** evidence of a problem.
     - `OBSERVATION` — the prospect published it. Their own words, quotable back to them. Also **not** evidence of a problem.
+    - `interests` — posts they **reposted**. Someone else wrote them. They show what caught this person's interest, not what they think. You may say they shared it and engage with its topic. Never say they wrote, posted or said it; never quote it; never name its original author (we hold no verified name); and never read a problem into it — a reposted hiring post is somebody else's hiring. Interests never change the tier.
     - `SIGNAL` — the prospect themselves said something implying a business problem. **Only a signal licenses a claim about their situation.**
     - `unknowns` — what we do not know. Read this list before writing. Every item on it is something you must not fill in.
 
@@ -246,8 +247,8 @@ the attempt.
 
 - **`none`** — return `INSUFFICIENT_CONTEXT`. Nothing else.
 
-- **`weak`** — a verified fact and no more. This is **draftable and normally
-  should be drafted**: name the one thing we actually know, introduce Agentic Labs
+- **`weak`** — a verified fact and no more (plus any `interests` — see
+  below). This is **draftable and normally should be drafted**: name the one thing we actually know, introduce Agentic Labs
   plainly, ask. Two short paragraphs, not three — you are working to 600
   characters, not 1200. Do not reach for a reason they should care; do not
   argue that their sector or company size is one where our work matters. That
@@ -265,6 +266,14 @@ the attempt.
   offer a cautious read of their situation, **tied to that signal and nothing
   wider**. One sentence of it, not a paragraph. The claim must stay about the
   thing they said; it may not widen into "and so you must also have…".
+
+- **`interests`** — posts they reposted, at any tier. When they have written
+  nothing themselves, an interest is usually the best reason you have for
+  writing: name the topic they shared ("saw you shared a post on eval
+  tooling") and ask. Prefer their own words when you have both. An interest
+  raises nothing: not the tier, not the licence to diagnose. Say *shared* or
+  *reposted*, never *wrote*, *posted* or *said*; do not quote it; do not name
+  who wrote it. An automated gate rejects a repost presented as their words.
 
 ### Per-kind notes
 
@@ -300,13 +309,14 @@ You will receive a JSON payload with these fields:
     "pitch_context": "<optional free-text notes from the user about this prospect>"
   },
   "recent_posts": [
-    { "text": "...", "posted_at": "..." }
+    { "text": "<their own words — reposts are never here>", "posted_at": "..." }
   ],
   "evidence": {
     "tier": "strong" | "moderate" | "weak" | "none",
     "pain_claim_licensed": true | false,
     "verified_facts": [ { "statement": "...", "source": "..." } ],
     "observations":   [ { "statement": "...", "detail": "<their words>" } ],
+    "interests":      [ { "statement": "...", "detail": "<someone else's words, which they reposted>" } ],
     "signals":        [ { "statement": "...", "detail": "<their words>" } ],
     "unknowns":       [ "..." ],
     "licensed_claims": [ "the only things a claim may be built on" ]

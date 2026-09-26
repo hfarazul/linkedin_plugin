@@ -109,6 +109,7 @@ def main() -> int:
 
     from linkedin_agent import campaigns as campaigns_mod
     from linkedin_agent import db, drafter as drafter_mod, trace
+    from linkedin_agent import daily as daily_mod
     from linkedin_agent.trace import say
     from linkedin_agent.config import load as load_config
     from linkedin_agent.icp_scoring import CampaignICP, grade
@@ -312,14 +313,20 @@ def main() -> int:
                            "(PhantomBuster Activity Extractor unverified, task T-3 family)")
                 else:
                     try:
+                        # Reposts included, as daily fetches them: the
+                        # evidence engine types them as interests.
                         posts = router.perform(Capability.RECENT_POSTS,
-                                               "get_recent_posts", linkedin_url, 3)
+                                               "get_recent_posts", linkedin_url, 3,
+                                               include_reposts=True)
                         st.note("posts_found", len(posts))
+                        st.note("of_which_reposts",
+                                sum(1 for p in posts if p.is_repost))
                         # A video or image post scrapes with no postContent.
                         # It is a valid target for a reaction but gives the
                         # drafter nothing to reference, so the two counts are
                         # reported separately rather than as one number.
-                        quotable = [p for p in posts if (p.text or "").strip()]
+                        quotable = [p for p in posts
+                                    if (p.text or "").strip() and not p.is_repost]
                         st.note("posts_with_text", len(quotable))
                         for i, p in enumerate(quotable[:2]):
                             st.note(f"post_{i}", (p.text or "")[:100])
@@ -348,7 +355,8 @@ def main() -> int:
                             f"{label}: {prev.title} at {prev.company}")
                 if facts.company_employee_count:
                     context_bits.append(f"company size: {facts.company_employee_count}")
-                quotable_posts = [p for p in posts if (p.text or "").strip()]
+                quotable_posts = [p for p in posts
+                                  if (p.text or "").strip() and not p.is_repost]
                 if quotable_posts:
                     context_bits.append(f"{len(quotable_posts)} recent post(s)")
                 pitch_context = ". ".join(context_bits) or None
@@ -377,6 +385,7 @@ def main() -> int:
                 st.note("pain_claim_licensed", bundle.pain_claim_licensed)
                 st.note("verified_facts", len(bundle.facts))
                 st.note("observations", len(bundle.observations))
+                st.note("interests", len(bundle.interests))
                 st.note("signals", [e.source for e in bundle.signals] or "none")
                 st.note("unknowns", len(bundle.unknowns))
                 # The payload production actually sends. This harness used to
@@ -392,8 +401,7 @@ def main() -> int:
                 # production never produces.
                 payload = evidence_context.build_for(
                     args.kind, prospect_id,
-                    recent_posts=[{"text": p.text, "posted_at": p.posted_at}
-                                  for p in posts]) or {}
+                    recent_posts=daily_mod.draft_posts(posts)) or {}
                 none_applied = "(not applied for this kind)"
                 st.note("email_shape",
                         (payload.get("shape") or {}).get("name", none_applied))
@@ -433,8 +441,7 @@ def main() -> int:
                     tries: list = []
                     raw = drafter_mod.draft(
                         args.kind, prospect_id,
-                        recent_posts=[{"text": p.text, "posted_at": p.posted_at}
-                                      for p in posts],
+                        recent_posts=daily_mod.draft_posts(posts),
                         evidence=payload,
                         attempts_out=tries)
                     drafted_subject, body = drafter_mod.parse_email(raw)

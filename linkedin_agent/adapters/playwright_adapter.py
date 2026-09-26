@@ -117,7 +117,8 @@ class PlaywrightAdapter(LinkedInAdapter):
 
     # ------------------------------------------------------------------- posts
 
-    def get_recent_posts(self, linkedin_url: str, limit: int = 5) -> list[Post]:
+    def get_recent_posts(self, linkedin_url: str, limit: int = 5, *,
+                         include_reposts: bool = False) -> list[Post]:
         page = self._ensure()
         activity_url = linkedin_url.rstrip("/") + "/recent-activity/all/"
         page.goto(activity_url, wait_until="domcontentloaded")

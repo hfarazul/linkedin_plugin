@@ -46,9 +46,14 @@ class RouterAdapter(LinkedInAdapter):
             limit=limit, date_posted=date_posted,
             author_keywords=author_keywords)
 
-    def get_recent_posts(self, linkedin_url: str, limit: int = 5) -> list[Post]:
+    def get_recent_posts(self, linkedin_url: str, limit: int = 5, *,
+                         include_reposts: bool = False) -> list[Post]:
+        # Passed only when set, so a provider that has never heard of reposts
+        # is called exactly as before.
+        extra = {"include_reposts": True} if include_reposts else {}
         return self.router.perform(
-            Capability.RECENT_POSTS, "get_recent_posts", linkedin_url, limit)
+            Capability.RECENT_POSTS, "get_recent_posts", linkedin_url, limit,
+            **extra)
 
     # ------------------------------------------------------------ writes
 

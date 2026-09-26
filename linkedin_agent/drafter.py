@@ -402,6 +402,55 @@ def _contains_unsupported_authority(body: str,
     return None
 
 
+# Reposts are the one piece of evidence that is somebody else's words. They
+# were filtered out entirely because "quoting a repost back as the prospect's
+# own thinking attributes someone else's words to them". They now reach the
+# drafter as `interests`, labelled as reposts, and this is the backstop for
+# the failure the filter used to prevent.
+#
+# "You shared" and "you reposted" are the honest verbs and are never matched.
+# What is matched is authorship: "you wrote", "your post", "in your words".
+_AUTHORSHIP = re.compile(
+    r"(?i)\b(?:you (?:wrote|posted|said|argued|mentioned|noted|observed|"
+    r"pointed out|made the point|put it)|"
+    r"your (?:own )?(?:post|article|piece|words|take|point|line|thoughts?|"
+    r"writing)|in your (?:post|words))\b")
+_QUOTED_SPAN = re.compile(r'"[^"]{12,}"')
+
+
+def _shingles(text: str, n: int = 4) -> list[tuple[str, ...]]:
+    words = re.findall(r"[a-z0-9']+", _normalise_quotes(text.lower()))
+    return [tuple(words[i:i + n]) for i in range(len(words) - n + 1)]
+
+
+def _misattributes_repost(body: str, evidence: dict | None) -> str | None:
+    """Return how the draft presents a repost as the prospect's words, or None.
+
+    Two shapes. With nothing of their own to point at, any authorship language
+    is about a repost, because that is all there is. With both, a sentence that
+    attributes or quotes is checked for a run of words that appears in a repost
+    and in nothing they wrote themselves.
+    """
+    interests = (evidence or {}).get("interests") or []
+    if not interests:
+        return None
+    own = [o.get("detail") or "" for o in (evidence or {}).get("observations") or []]
+    reposted = {s for i in interests for s in _shingles(i.get("detail") or "")}
+    theirs = {s for text in own for s in _shingles(text)}
+    for sentence in _sentences(_normalise_quotes(body)):
+        attributed = _AUTHORSHIP.search(sentence)
+        if not (attributed or _QUOTED_SPAN.search(sentence)):
+            continue
+        if attributed and not own:
+            return (f"{attributed.group(0)!r}, but nothing they wrote is in "
+                    f"the evidence — only posts they reposted")
+        for shingle in _shingles(sentence):
+            if shingle in reposted and shingle not in theirs:
+                return (f"{' '.join(shingle)!r}, from a post they reposted, "
+                        f"presented as their own words")
+    return None
+
+
 def _contains_filler(body: str) -> str | None:
     """Return the recycled template phrase, or None if clean."""
     low = _normalise_quotes(body.lower())
@@ -524,7 +573,11 @@ def build_input(
             "title": prospect_row["title"],
             "pitch_context": prospect_row["pitch_context"],
         },
-        recent_posts=list(recent_posts or []),
+        # The prompt describes `recent_posts` as the prospect's posts, so only
+        # their own go here. Reposts reach the drafter solely through
+        # `evidence.interests`, where they are labelled as someone else's.
+        recent_posts=[p for p in (recent_posts or [])
+                      if not evidence_mod.is_repost(p)],
         prior_messages=prior,
         evidence=evidence,
         sender=senders_mod.resolve(campaign_sender).as_dict(),
@@ -961,6 +1014,24 @@ def draft(
                     f"not argue for relevance — ask about it."
                 )
                 continue
+
+        # Someone else's words presented as theirs. Only possible when the
+        # evidence holds reposts, and then checked on every kind.
+        borrowed = _misattributes_repost(body, evidence)
+        if borrowed:
+            _record(attempts_out, attempt, "rejected", "misattributed_repost",
+                    borrowed)
+            last_failure = f"misattributed repost {borrowed} (attempt {attempt})"
+            last_body_preview = body
+            retry_hint = (
+                f"Your previous attempt presented a post they REPOSTED as "
+                f"their own words ({borrowed}). Someone else wrote it. It "
+                f"tells you what caught their interest, nothing more. You may "
+                f"say they shared or reposted something and engage with its "
+                f"topic; do not say they wrote, posted or said it, do not "
+                f"quote it, and do not name its author."
+            )
+            continue
 
         # Seniority claims about US. Checked before the brief-vocabulary gate
         # because that gate structurally cannot see this one: a spelled-out

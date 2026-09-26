@@ -23,6 +23,12 @@ So facts are typed by what they license, not by where they came from:
                    a post about coding agents does not mean they have a
                    bottleneck.
 
+                   A repost is an OBSERVATION too, of a narrower thing: that
+                   someone else's post caught their interest. `authored` is
+                   False, it travels as `interests` rather than
+                   `observations`, it is never quoted as theirs, never sets
+                   the tier, and never produces a SIGNAL.
+
     SIGNAL         Evidence that a business problem plausibly exists, stated by
                    the prospect themselves. Hiring engineers. Announcing a
                    raise. Describing a rebuild. ONLY a signal licenses a pain
@@ -85,6 +91,7 @@ class Evidence:
     detail: str | None = None        # the prospect's own words, when we have them
     claim: str | None = None         # the ONLY claim this evidence permits
     name: str | None = None          # rule that produced it, for phrasing lookup
+    authored: bool = True            # False: someone else's words they reposted
 
     def as_dict(self) -> dict:
         d = {"kind": self.kind.value, "statement": self.statement,
@@ -238,7 +245,19 @@ class EvidenceBundle:
 
     @property
     def observations(self) -> list[Evidence]:
-        return self.of(EvidenceKind.OBSERVATION)
+        """What they published in their own words. Quotable back to them."""
+        return [e for e in self.of(EvidenceKind.OBSERVATION) if e.authored]
+
+    @property
+    def interests(self) -> list[Evidence]:
+        """Other people's posts they reposted: what caught their interest.
+
+        Kept out of `observations` on purpose. Everything downstream reads an
+        observation as their words — the moderate tier, the two-observation
+        shape, the harness's "Your post —" opener — and a repost in that list
+        would put someone else's words in their mouth.
+        """
+        return [e for e in self.of(EvidenceKind.OBSERVATION) if not e.authored]
 
     @property
     def facts(self) -> list[Evidence]:
@@ -273,6 +292,7 @@ class EvidenceBundle:
             "pain_claim_licensed": self.pain_claim_licensed,
             "verified_facts": [e.as_dict() for e in self.facts],
             "observations": [e.as_dict() for e in self.observations],
+            "interests": [e.as_dict() for e in self.interests],
             "signals": [e.as_dict() for e in self.signals],
             "unknowns": self.unknowns,
             "licensed_claims": [e.claim for e in self.items
@@ -295,6 +315,12 @@ class EvidenceBundle:
                 "proof_domain": proof_domain,
             }
         return payload
+
+
+def is_repost(post) -> bool:
+    if isinstance(post, dict):
+        return bool(post.get("is_repost"))
+    return bool(getattr(post, "is_repost", False))
 
 
 def build_evidence(facts, posts=None, *, transition_is_direct: bool = False,
@@ -356,10 +382,15 @@ def build_evidence(facts, posts=None, *, transition_is_direct: bool = False,
             ))
 
     quotable = []
+    reposted = []
     for post in posts or []:
         text = (getattr(post, "text", None) or
                 (post.get("text") if isinstance(post, dict) else "") or "")
-        if text.strip():
+        if not text.strip():
+            continue
+        if is_repost(post):
+            reposted.append(text)
+        else:
             quotable.append((post, text))
 
     for post, text in quotable:
@@ -371,6 +402,22 @@ def build_evidence(facts, posts=None, *, transition_is_direct: bool = False,
         ))
 
     items.extend(detect_signals([p for p, _ in quotable]))
+
+    # What they reposted. It says what caught their interest, so it is worth
+    # having — for a prospect who never writes anything, it is often all we
+    # have. It is NOT their words, so it is never searched for signals: a
+    # reposted "we're hiring" is somebody else's hiring, and the pain gate
+    # exists to stop exactly that kind of borrowed claim.
+    for text in reposted:
+        items.append(Evidence(
+            kind=EvidenceKind.OBSERVATION,
+            statement=("they reposted this. Someone else wrote it: it shows "
+                       "what caught their interest, not what they think"),
+            source="a post they reposted, written by someone else",
+            detail=" ".join(text.split())[:400],
+            name="repost",
+            authored=False,
+        ))
 
     # What they wrote to us. Same rules, different provenance — and the
     # provenance is stated so the drafter cannot call a private message a post.
@@ -397,7 +444,12 @@ def build_evidence(facts, posts=None, *, transition_is_direct: bool = False,
     # Name the silence explicitly. Each of these is a gap the drafter has
     # previously filled with invention.
     if not quotable and not said_to_us:
-        unknowns.append("nothing they have written — no posts retrieved")
+        if reposted:
+            unknowns.append("what they think about anything — they have "
+                            "written nothing themselves, only reposted "
+                            "other people's posts")
+        else:
+            unknowns.append("nothing they have written — no posts retrieved")
     if not any(e.licenses_pain_claim for e in items):
         unknowns.append("whether they have any build, tooling or scaling "
                         "problem — no evidence either way")
@@ -828,7 +880,10 @@ def _text_about(facts, bundle: "EvidenceBundle") -> str:
              getattr(facts, "company_name", "") or ""]
     for pos in (getattr(facts, "positions", None) or [])[:2]:
         parts += [pos.title or "", pos.company or ""]
-    parts += [e.detail or "" for e in bundle.observations]
+    # Interests count here. This only chooses which true thing about US is
+    # worth saying — it licenses nothing about them — and "what caught their
+    # interest" is precisely what should steer that choice.
+    parts += [e.detail or "" for e in bundle.observations + bundle.interests]
     return " ".join(parts)
 
 

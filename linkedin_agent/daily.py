@@ -190,25 +190,33 @@ def run_daily(
                 break
             try:
                 # Fetch 3 (not 1) so the connect-step drafter can reuse them.
-                # We still react only to posts[0] — the rest is free cache fill.
-                posts = adapter.get_recent_posts(p["linkedin_url"], limit=3)
-                if not posts:
+                # Reposts come along in the same scrape for the drafter, which
+                # reads them as interests. We react only to something the
+                # prospect wrote: liking a repost would be liking a stranger's
+                # post on their behalf. No post of their own means no reaction,
+                # exactly as before reposts were fetched.
+                posts = adapter.get_recent_posts(p["linkedin_url"], limit=3,
+                                                 include_reposts=True)
+                own = [post for post in posts
+                       if not getattr(post, "is_repost", False)]
+                if not own:
                     continue
                 posts_cache[int(p["id"])] = posts
+                target = own[0]
                 if cfg.dry_run:
                     # DRY_RUN: skip the LinkedIn write but still advance state +
                     # log the intent so subsequent daily steps see the prospect
                     # as reacted (mirrors the CLI react command's behavior).
                     db.set_status(int(p["id"]), "reacted")
                     db.log_action(int(p["id"]), "react",
-                                  json.dumps({"post": posts[0].post_id, "via": "daily"}),
+                                  json.dumps({"post": target.post_id, "via": "daily"}),
                                   "dry_run", True)
                 else:
-                    adapter.react(posts[0], reaction="LIKE")
+                    adapter.react(target, reaction="LIKE")
                     db.set_status(int(p["id"]), "reacted")
                     db.log_action(int(p["id"]), "react",
-                                  json.dumps({"post": posts[0].post_id, "via": "daily"}),
-                                  posts[0].post_id, False)
+                                  json.dumps({"post": target.post_id, "via": "daily"}),
+                                  target.post_id, False)
                 result.reactions_sent += 1
             except Exception as e:
                 logger.warning("react failed for prospect %d: %s", p["id"], e)
@@ -464,14 +472,29 @@ def _fetch_posts_for_draft(adapter, prospect, *, limit: int = 3, cache: dict | N
     a second round-trip for the same profile in the same cron fire."""
     pid = int(prospect["id"])
     if cache is not None and pid in cache:
-        cached = cache[pid][:limit]
-        return [{"text": p.text, "posted_at": p.posted_at} for p in cached]
+        return draft_posts(cache[pid], limit)
     try:
-        posts = adapter.get_recent_posts(prospect["linkedin_url"], limit=limit)
+        posts = adapter.get_recent_posts(prospect["linkedin_url"], limit=limit,
+                                         include_reposts=True)
     except Exception as e:
         logger.warning("get_recent_posts failed for prospect %d: %s", prospect["id"], e)
         return []
-    return [{"text": p.text, "posted_at": p.posted_at} for p in posts]
+    return draft_posts(posts, limit)
+
+
+def draft_posts(posts, limit: int = 3) -> list[dict]:
+    """Posts as the dicts the drafter and evidence engine read.
+
+    `is_repost` has to survive this conversion. Dropping it — as the old
+    `{"text", "posted_at"}` shape did — would hand a repost to the evidence
+    engine as something the prospect wrote. Own posts and reposts are capped
+    separately, so reposts never displace their own words.
+    """
+    own = [p for p in posts if not getattr(p, "is_repost", False)][:limit]
+    shared = [p for p in posts if getattr(p, "is_repost", False)][:limit]
+    return [{"text": p.text, "posted_at": p.posted_at,
+             "is_repost": bool(getattr(p, "is_repost", False))}
+            for p in own + shared]
 
 
 def _has_pending_draft(prospect_id: int, kind: str) -> bool:

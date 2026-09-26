@@ -52,8 +52,10 @@ class FakeAdapter(LinkedInAdapter):
             ))
         return out
 
-    def get_recent_posts(self, linkedin_url: str, limit: int = 5) -> list[Post]:
-        self._record("get_recent_posts", linkedin_url, limit=limit)
+    def get_recent_posts(self, linkedin_url: str, limit: int = 5, *,
+                         include_reposts: bool = False) -> list[Post]:
+        self._record("get_recent_posts", linkedin_url, limit=limit,
+                     include_reposts=include_reposts)
         slug = linkedin_url.rstrip("/").rsplit("/", 1)[-1]
         return [
             Post(

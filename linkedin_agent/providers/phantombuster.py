@@ -543,6 +543,12 @@ class PhantomBusterProvider(CapabilityProvider):
         wrote" — quoting a repost back as the prospect's own thinking
         attributes someone else's words to them, which is the same failure as
         claiming a career move that never happened.
+
+        With `include_reposts=True` they come back marked `is_repost`, after
+        the prospect's own posts and capped separately, so a burst of reposts
+        can never push out the one thing they actually wrote. A repost still
+        says something — what caught their interest — and `build_evidence`
+        types it as exactly that and nothing more.
         """
         agent = self._require_agent(Capability.RECENT_POSTS)
         # Verified argument names: the Extractor takes the target profile as
@@ -600,8 +606,11 @@ class PhantomBusterProvider(CapabilityProvider):
                 logger.info("activity for %s served from cumulative results "
                             "(the Phantom found nothing new)", linkedin_url)
                 result.rows = cached
-        posts: list[Post] = []
+        own: list[Post] = []
+        reposts: list[Post] = []
         for row in result.rows:
+            if len(own) >= limit and (not include_reposts or len(reposts) >= limit):
+                break
             post_url = row.get("postUrl")
             if not post_url:
                 continue
@@ -617,7 +626,10 @@ class PhantomBusterProvider(CapabilityProvider):
                 is_own = True
             if not is_own and not include_reposts:
                 continue
-            posts.append(Post(
+            bucket = own if is_own else reposts
+            if len(bucket) >= limit:
+                continue
+            bucket.append(Post(
                 post_id=str(post_url),
                 url=post_url,
                 # The real author, so a caller can always tell whose words
@@ -626,10 +638,10 @@ class PhantomBusterProvider(CapabilityProvider):
                 text=(row.get("postContent") or "")[:1000],
                 # postDate is relative ("3w"); postTimestamp is ISO.
                 posted_at=row.get("postTimestamp") or row.get("postDate"),
+                is_repost=not is_own,
             ))
-            if len(posts) >= limit:
-                break
-        return posts
+        # Own posts first: a caller that takes posts[0] gets their words.
+        return own + reposts
 
     # ---------------------------------------------------------------- writes
 

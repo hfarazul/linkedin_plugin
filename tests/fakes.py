@@ -194,7 +194,7 @@ class FakeProvider:
         self._maybe_raise()
         return list(self._hits)[:limit]
 
-    def get_recent_posts(self, linkedin_url, limit=5):
+    def get_recent_posts(self, linkedin_url, limit=5, *, include_reposts=False):
         self.calls.append(("get_recent_posts", linkedin_url))
         self._maybe_raise()
         return list(self._posts)[:limit]

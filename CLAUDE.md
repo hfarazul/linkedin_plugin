@@ -56,6 +56,17 @@ Real Inbox Scraper output looks like `"2025-05-31T09:57:02.966Z"`, not date-only
 
 With `evidence=None`, `enforce_pain_gate` is False for DM kinds and `thin_evidence` is False, so **the pain-claim and inferred-relevance gates are inactive on the live DM path.** Nothing reaches anyone today because email sending isn't built and LinkedIn writes are disarmed — but those gates are what make a first-touch draft defensible, and they must be in the execution path before the email path goes live.
 
+### 7. A repost is an interest, not their words
+
+The Activity Extractor returns reposts alongside original posts. `daily` and the smoke harness fetch them (`include_reposts=True`), and they arrive marked `Post.is_repost`. `evidence.build_evidence` types them as `interests`: an `OBSERVATION` with `authored=False`. That is all they are:
+
+- never in `observations`, never the tier: a prospect who only reposts is still `weak`
+- never a `SIGNAL`: a reposted "we're hiring" is somebody else's hiring
+- never in the drafter's raw `recent_posts`, which the prompt calls their posts
+- never reacted to: the react step likes only a post they wrote
+
+The `misattributed_repost` gate rejects a draft that presents one as their words. **Anything converting `Post`s to dicts must keep `is_repost`** — use `daily.draft_posts`. The old `{"text", "posted_at"}` shape silently turns a repost into their own post.
+
 ---
 
 ## The system in 30 seconds
