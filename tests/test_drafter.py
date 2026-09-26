@@ -594,3 +594,31 @@ def test_drafter_output_is_decoded_as_utf8(monkeypatch) -> None:
         "without an explicit codec the locale one is used"
     assert captured.get("errors"), "an undecodable byte must not raise mid-draft"
     assert "\u2014" in out
+
+
+@pytest.mark.unit
+def test_the_prompt_goes_to_claude_on_stdin_not_the_command_line(monkeypatch) -> None:
+    """Windows caps a command line at 32,767 characters and the rendered
+    prompt outgrew it, so every live draft on Windows died with WinError 206
+    before claude ran. On stdin there is no such cap."""
+    import linkedin_agent.drafter as d
+
+    captured = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"], captured["kwargs"] = cmd, kwargs
+        return _Proc()
+
+    monkeypatch.setattr(d.shutil, "which", lambda name: "/usr/bin/claude")
+    monkeypatch.setattr(d.subprocess, "run", fake_run)
+    prompt = "x" * 40_000
+    d._invoke_claude(prompt)
+
+    assert prompt not in captured["cmd"]
+    assert sum(len(part) for part in captured["cmd"]) < 1_000
+    assert captured["kwargs"]["input"] == prompt
