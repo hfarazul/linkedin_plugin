@@ -45,6 +45,11 @@ KIND_MAX_CHARS = {
     # is generous enough for a hook, positioning and a CTA without inviting a
     # wall of text that reads as a template.
     "email1": 1200,
+    # The eight-email cadence. Its real bound is in words (MAIN_WORDS,
+    # FOLLOWUP_MAX_WORDS), which is how the GTM brief states it; these are
+    # backstops so an absurd output is caught before the word count runs.
+    "email_main": 1100,
+    "email_followup": 450,
 }
 
 # Minimum length per kind — anything shorter is almost always a degenerate
@@ -60,6 +65,10 @@ KIND_MIN_CHARS = {
     # acknowledge + content + sign-off.
     "reply": 80,
     "email1": 250,
+    # Backstops only, set low so the word band is what fires: its retry hint
+    # speaks the brief's language (words), a character floor's does not.
+    "email_main": 100,
+    "email_followup": 40,
 }
 
 # Auto-retry budget. The drafter is stochastic — a fresh `claude -p` call
@@ -451,6 +460,148 @@ def _misattributes_repost(body: str, evidence: dict | None) -> str | None:
     return None
 
 
+# ------------------------------------------------------------ the cadence
+#
+# Gates that exist only for the eight-email cadence (email_main and
+# email_followup). Each one holds a line the GTM brief could otherwise be read
+# as crossing. The brief's wording is quoted where it matters, because the
+# point of each gate is the gap between what was asked for and what may be
+# said to a real person.
+
+CADENCE_KINDS = ("email_main", "email_followup")
+
+# "At least 80 words long (and always less than 120 words)" for the main
+# emails; follow-ups "light on words but asking questions".
+MAIN_WORDS = (80, 119)
+FOLLOWUP_MAX_WORDS = 50
+
+_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9'’-]*")
+
+
+def email_text(body: str, sign_off: str | None = None) -> str:
+    """The email itself: no subject line, no sign-off block."""
+    text = parse_email(body)[1]
+    if sign_off and sign_off.strip() in text:
+        text = text[:text.rindex(sign_off.strip())]
+    return text.strip()
+
+
+def cadence_words(body: str, sign_off: str | None = None) -> int:
+    return len(_WORD.findall(email_text(body, sign_off)))
+
+
+def subject_problem(subject: str | None, first_name: str | None) -> str | None:
+    """Why a first-touch subject fails the brief, or None.
+
+    "Have their first name in the first or second word of the subject."
+    """
+    if not subject:
+        return "no subject line"
+    if not first_name:
+        return None
+    words = [w.strip("'’").lower() for w in _WORD.findall(subject)]
+    if first_name.lower() not in words[:2]:
+        return f"their first name ({first_name}) is not in the first two words"
+    if len(words) > 9:
+        return f"{len(words)} words — a subject line, not a sentence"
+    return None
+
+
+# The career angle. The brief asked the drafter to "speculate if the person is
+# stuck in their career - and if yes, provide them a way out by being a hero".
+# Tenure can shape which question is asked; it can never be said back to them
+# as a verdict about their career, and a stranger who opens with one has told
+# the prospect exactly how the email was written.
+_CAREER_TELLS = re.compile(
+    r"(?i)\b(?:stuck|plateau(?:ed|ing)?|stagnat\w*|your career|"
+    r"career (?:move|change|growth|path|progression|next step)|"
+    r"next chapter|next career|time for a change|outgr(?:ew|own|owing)|"
+    r"been there (?:a while|too long)|way out|hero)\b")
+_TENURE_FIGURE = re.compile(
+    r"\b\d+ years? (?:at|with|in|as|running|leading|building)\b")
+
+
+def _contains_career_diagnosis(body: str) -> str | None:
+    text = _normalise_quotes(body)
+    match = _CAREER_TELLS.search(text)
+    if match:
+        return match.group(0)
+    for sentence in _sentences(_fold_authority_text(text)):
+        if _SECOND_PERSON.search(sentence):
+            figure = _TENURE_FIGURE.search(sentence)
+            if figure:
+                return f"{figure.group(0)} (their tenure as a figure)"
+    return None
+
+
+# A hypothesis is our guess from their role. It licenses a question — "is that
+# true for you?" — and a pattern stated about other people — "something I see
+# a lot with COOs". It does not license a statement about THEM. A sentence
+# addressed to them that is not tentative, and carries the guess's own words,
+# is the guess turned into a claim.
+_SECOND_PERSON = re.compile(r"(?i)\b(?:you|your|you're|you've|yours)\b")
+_TENTATIVE = re.compile(r"(?i)\b(?:whether|wonder|wondering|curious|if)\b")
+
+
+def _states_hypothesis_as_fact(body: str, evidence: dict | None) -> str | None:
+    hypotheses = (evidence or {}).get("hypotheses") or []
+    if not hypotheses:
+        return None
+    for sentence in _sentences(_normalise_quotes(parse_email(body)[1])):
+        clean = sentence.strip()
+        if clean.endswith("?") or _TENTATIVE.search(clean):
+            continue
+        if not _SECOND_PERSON.search(clean):
+            continue
+        low = clean.lower()
+        for h in hypotheses:
+            for term in evidence_mod.hypothesis_terms(h.get("name")):
+                if term in low:
+                    return (f"{term!r}, said about them as a fact — the "
+                            f"{h.get('name')} guess may only be asked about")
+    return None
+
+
+# The case studies are the company's work. The Experial entry names Haque as
+# its builder; with anyone else sending, "I built Experial" is false. "We
+# built" is true for every sender.
+_FIRST_PERSON_BUILT = re.compile(
+    r"(?i)\b(?:i|i've|i have|i had)\s+(?:personally\s+)?"
+    r"(?:built|shipped|designed|developed|created|led the build of|made)\b")
+
+
+def _claims_team_work_personally(body: str, brief: str) -> str | None:
+    names = evidence_mod.proof_points(brief)
+    for sentence in _sentences(_normalise_quotes(body)):
+        if not _FIRST_PERSON_BUILT.search(sentence):
+            continue
+        for name in names:
+            if name.lower() in sentence.lower():
+                return f"{name} claimed in the first person singular"
+    return None
+
+
+def _repeats_previous_email(body: str, previous: Sequence[str],
+                            sign_off: str | None = None,
+                            n: int = 7) -> str | None:
+    """A run of words lifted from an earlier email in the same thread.
+
+    Eight emails that each read well alone and repeat each other's sentences
+    are the failure the whole cadence has to avoid: one person progressing a
+    conversation does not paste themselves.
+    """
+    mine = _shingles(email_text(body, sign_off), n)
+    for earlier in previous:
+        theirs = set(_shingles(email_text(earlier, sign_off), n))
+        for shingle in mine:
+            if shingle in theirs:
+                return " ".join(shingle)
+    return None
+
+
+_LINK = re.compile(r"(?i)https?://|www\.|\b[a-z0-9-]+\.(?:ai|com|io)/\S")
+
+
 def _contains_filler(body: str) -> str | None:
     """Return the recycled template phrase, or None if clean."""
     low = _normalise_quotes(body.lower())
@@ -490,6 +641,9 @@ class DrafterInput:
     # Who the message is from: their sign-off, their calendar link, and the
     # personal credentials only they may claim. See linkedin_agent/senders.py.
     sender: dict | None = None
+    # One email of the cadence: which touch it is, what it is for, what it
+    # may use, and what the thread has already said. See sequence.py.
+    touch: dict | None = None
 
 
 # -------------------------------------------------------------- prompt loading
@@ -517,6 +671,7 @@ def build_input(
     prospect_id: int,
     recent_posts: Sequence[dict] | None = None,
     evidence: dict | None = None,
+    touch: dict | None = None,
 ) -> DrafterInput:
     """Assemble the JSON payload the drafter prompt expects.
     The caller passes recent_posts because that comes from the adapter, not the DB."""
@@ -561,6 +716,12 @@ def build_input(
                 (prospect_id,),
             )
             prior = [dict(r) for r in cur.fetchall()]
+    elif touch:
+        # Nothing in the cadence has been sent, so the thread lives in the
+        # sequence state rather than in `messages`.
+        prior = [{"direction": "outbound", "touch": t.get("number"),
+                  "subject": t.get("subject"), "body": t.get("body")}
+                 for t in touch.get("previous_emails") or []]
 
     return DrafterInput(
         kind=kind,
@@ -581,7 +742,73 @@ def build_input(
         prior_messages=prior,
         evidence=evidence,
         sender=senders_mod.resolve(campaign_sender).as_dict(),
+        touch=touch,
     )
+
+
+def _touch_block(touch: dict) -> str:
+    """What this one email of the cadence is for, stated outside the JSON.
+
+    Restated for the same reason the evidence tier is: it is binding, and a
+    rule buried in a payload field competes with everything else there.
+    """
+    n, total = touch["number"], touch.get("of", 8)
+    words = touch.get("words") or {}
+    if touch.get("kind") == "email_followup":
+        length = (f"At most {words.get('max')} words, not counting the "
+                  f"sign-off. It must ask a question. No case study, no "
+                  f"re-introduction, no pitch.")
+    else:
+        length = (f"Between {words.get('min')} and {words.get('max')} words, "
+                  f"not counting the sign-off. Count them.")
+    lines = [f"THIS EMAIL — {n} of {total}, {touch.get('kind')}: "
+             f"{touch.get('role')}",
+             touch.get("brief", ""), "", f"Length: {length}"]
+    if touch.get("subject"):
+        lines.append(f"Subject: do NOT write a subject line. This email "
+                     f"replies in the thread \"{touch['subject']}\".")
+    else:
+        lines.append("Subject: write one, as the first line, prefixed "
+                     "`Subject: `. Their first name must be the first or "
+                     "second word. Short, plain, no marketing structure.")
+    content = touch.get("content")
+    if content:
+        verb = ("they reposted it; someone else wrote it, so say they "
+                "shared it" if content.get("kind") == "repost"
+                else "they wrote it")
+        lines.append(f"The one piece of their LinkedIn activity this email may "
+                     f"use ({verb}): {content.get('text')!r}. Mention no "
+                     f"other post.")
+    else:
+        lines.append("Mention none of their posts in this email.")
+    themes = touch.get("content_themes")
+    if themes:
+        lines.append(f"Words that recur across what they share (counted, not "
+                     f"interpreted): {', '.join(themes)}. You may say they "
+                     f"share a lot about one of these; do not read meaning "
+                     f"into it.")
+    hyp = touch.get("hypothesis")
+    if hyp:
+        lines.append(f"The guess this email is built on (OUR guess from their "
+                     f"role, not anything they said): {hyp.get('statement')}. "
+                     f"You may present it as a pattern you come across often "
+                     f"with people in their seat, then ASK "
+                     f"{hyp.get('asks')}. Never state it as a fact about them.")
+    proof = touch.get("proof_point")
+    if proof:
+        lines.append(f"Case study to cite, exactly as the brief states it. "
+                     f"Say \"we\" built it, never \"I\", and add no result it "
+                     f"does not list: {proof.get('brief')}")
+    used = touch.get("already_used") or {}
+    if any(used.values()):
+        lines.append(f"Already used earlier in this thread, do not reuse: "
+                     f"{json.dumps(used, ensure_ascii=False)}")
+    if touch.get("previous_emails"):
+        lines.append("Every earlier email in this thread is in "
+                     "`prior_messages`. Read them. Move the conversation on; "
+                     "do not repeat a sentence, an opener, or an "
+                     "introduction from them.")
+    return "\n".join(lines)
 
 
 def render_prompt(inp: DrafterInput, retry_hint: str | None = None) -> str:
@@ -637,18 +864,31 @@ def render_prompt(inp: DrafterInput, retry_hint: str | None = None) -> str:
                 f"prospect, and across a hundred sends that order is the "
                 f"tell.\n\n{closing}"
             )
+        if licensed:
+            standing = ("A signal supports a claim about their situation; "
+                        "keep the claim tied to that signal and phrase it as "
+                        "a read, not a diagnosis.")
+        elif inp.touch:
+            # The cadence's own version. "Introduce Agentic Labs plainly" is
+            # wrong for every email after the first, and a guess-led email is
+            # allowed to raise the pattern it was given, as long as it asks.
+            standing = ("NOTHING licenses a claim about this person's "
+                        "problems. If this email was given a guess, you may "
+                        "describe it as a pattern you see with other people "
+                        "in their seat and ask whether it is true for them; "
+                        "never state, imply or hedge that it is true of "
+                        "them.")
+        else:
+            standing = ("NOTHING licenses a claim about this person's "
+                        "problems. Do not state, imply, or hedge one. "
+                        "Reference what is verified, introduce Agentic Labs "
+                        "plainly, ask whether it is relevant.")
         closing = (
             f"Evidence tier for this prospect: "
-            f"{inp.evidence.get('tier')}. "
-            + ("A signal supports a claim about their situation; keep the "
-               "claim tied to that signal and phrase it as a read, not a "
-               "diagnosis."
-               if licensed else
-               "NOTHING licenses a claim about this person's problems. Do "
-               "not state, imply, or hedge one. Reference what is verified, "
-               "introduce Agentic Labs plainly, ask whether it is relevant.")
-            + f"\n\n{closing}"
+            f"{inp.evidence.get('tier')}. {standing}\n\n{closing}"
         )
+    if inp.touch:
+        closing = f"{_touch_block(inp.touch)}\n\n{closing}"
     if retry_hint:
         closing = f"{retry_hint}\n\n{closing}"
     return f"{base}\n\n# Context\n\n```json\n{payload}\n```\n\n{closing}"
@@ -828,6 +1068,79 @@ def parse_email(text: str) -> tuple[str | None, str]:
     return match.group(1).strip(), text[match.end():].strip()
 
 
+def _cadence_structure_problem(body: str, kind: str, touch: dict,
+                               inp: DrafterInput):
+    """(category, reason, retry hint) for a cadence email with the wrong
+    shape, or None. Length in words, a question in every follow-up, the
+    first-touch subject rule, and no links."""
+    sign_off = (inp.sender or {}).get("sign_off")
+    words = cadence_words(body, sign_off)
+    band = touch.get("words") or {}
+    low, high = band.get("min", 0), band.get("max", 10_000)
+    if not low <= words <= high:
+        want = (f"between {low} and {high}" if low else f"at most {high}")
+        return ("word_band", f"{words} words, want {want}",
+                f"Your previous attempt was {words} words; this email must be "
+                f"{want} words, not counting the sign-off. "
+                + ("Cut it to one or two short lines and a question."
+                   if kind == "email_followup" else
+                   "Rewrite it to that length; do not pad with filler."))
+    if kind == "email_followup" and "?" not in email_text(body, sign_off):
+        return ("followup_without_question", "no question asked",
+                "A follow-up must ask a question. Keep it short and end on "
+                "one genuine question they could answer in a line.")
+    if not touch.get("subject"):
+        first = (inp.prospect or {}).get("first_name")
+        problem = subject_problem(parse_email(body)[0], first)
+        if problem:
+            return ("subject_rule", problem,
+                    f"Start with `Subject: ` on the first line. {problem}: "
+                    f"put {first} as the first or second word, keep it short.")
+    if _LINK.search(email_text(body, sign_off)):
+        return ("link", "the email contains a link",
+                "No links. Cite our work by name and its published result; "
+                "a cold email with a link reads as a campaign.")
+    return None
+
+
+def _cadence_content_problem(body: str, touch: dict, inp: DrafterInput,
+                             evidence: dict | None, brief: str):
+    """(category, reason, retry hint) for a cadence email that says something
+    it may not, or None."""
+    career = _contains_career_diagnosis(body)
+    if career:
+        return ("career_diagnosis", f"{career!r}",
+                f"Your previous attempt said {career!r}. Their time in a role "
+                f"may shape the question you ask; it is never said back to "
+                f"them. No word about their career, no tenure figure, no "
+                f"'stuck', 'next chapter' or 'hero'. Ask whether AI "
+                f"implementation is a lever they are looking at, and stop.")
+    stated = _states_hypothesis_as_fact(body, evidence)
+    if stated:
+        return ("hypothesis_as_fact", stated,
+                f"Your previous attempt stated our guess as a fact about them "
+                f"({stated}). It is a guess from their role. Say it as a "
+                f"pattern you come across with people in their seat, then ask "
+                f"whether it is true for them. Never 'your team is...' or "
+                f"'you have...'.")
+    personal = _claims_team_work_personally(body, brief)
+    if personal:
+        return ("case_study_claimed_personally", personal,
+                f"Your previous attempt claimed a case study in the first "
+                f"person ({personal}). It is the company's work: say 'we "
+                f"built', never 'I built'.")
+    previous = [t.get("body") or "" for t in touch.get("previous_emails") or []]
+    repeated = _repeats_previous_email(body, previous,
+                                       (inp.sender or {}).get("sign_off"))
+    if repeated:
+        return ("repeats_earlier_email", f"{repeated!r}",
+                f"Your previous attempt repeated an earlier email in this "
+                f"thread word for word ({repeated!r}). One person moving a "
+                f"conversation on does not paste themselves. Say something "
+                f"new, in new words.")
+    return None
+
+
 def draft(
     kind: str,
     prospect_id: int,
@@ -835,6 +1148,7 @@ def draft(
     max_attempts: int = MAX_DRAFT_ATTEMPTS,
     evidence: dict | None = None,
     attempts_out: list | None = None,
+    touch: dict | None = None,
 ) -> str:
     """Generate a draft, retrying on recoverable failures (oversize / empty /
     suspiciously short). Raises DrafterError when:
@@ -842,8 +1156,11 @@ def draft(
       - All `max_attempts` runs failed quality checks
       - Build fails (missing prospect, invalid kind, etc.)
     """
+    # `touch` only when there is one, so every non-cadence call is made
+    # exactly as it was before the cadence existed.
+    extra = {"touch": touch} if touch else {}
     inp = build_input(kind, prospect_id, recent_posts=recent_posts,
-                      evidence=evidence)
+                      evidence=evidence, **extra)
     cap_max = KIND_MAX_CHARS[kind]
     cap_min = KIND_MIN_CHARS.get(kind, 50)
 
@@ -935,6 +1252,16 @@ def draft(
                 f"or profile and a real question. Do not return a single line."
             )
             continue
+
+        if touch:
+            problem = _cadence_structure_problem(body, kind, touch, inp)
+            if problem:
+                category, reason, hint = problem
+                _record(attempts_out, attempt, "rejected", category, reason)
+                last_failure = f"{category} {reason} (attempt {attempt})"
+                last_body_preview = body
+                retry_hint = hint
+                continue
 
         # Spam-tell scan: even with the prompt rule, the model occasionally
         # produces banal openers like "I came across your profile". Reject +
@@ -1032,6 +1359,17 @@ def draft(
                 f"quote it, and do not name its author."
             )
             continue
+
+        if touch:
+            problem = _cadence_content_problem(body, touch, inp, evidence,
+                                               grounding.text)
+            if problem:
+                category, reason, hint = problem
+                _record(attempts_out, attempt, "rejected", category, reason)
+                last_failure = f"{category} {reason} (attempt {attempt})"
+                last_body_preview = body
+                retry_hint = hint
+                continue
 
         # Seniority claims about US. Checked before the brief-vocabulary gate
         # because that gate structurally cannot see this one: a spelled-out

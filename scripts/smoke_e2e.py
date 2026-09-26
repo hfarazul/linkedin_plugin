@@ -54,6 +54,61 @@ from linkedin_agent import senders as senders_mod  # noqa: E402
 TOTAL_STAGES = 12
 
 
+class _SequenceDone(Exception):
+    """The cadence replaces stages 11-12; this skips the single-draft path."""
+
+
+def _run_sequence(run, trace, drafter_mod, sequence_mod, daily_mod,
+                  senders_mod, *, prospect_id, facts, posts, direct, brief,
+                  campaign_slug):
+    """Draft the cadence and write it out for review. Stages 11 and 12."""
+    import datetime as _dt
+
+    sender = senders_mod.resolve(brief.sender if brief else None)
+    with run.step("MESSAGE_DRAFTING", mode=trace.LIVE) as st:
+        st.note("mode", "eight-email cadence")
+        st.note("sender", f"{sender.full_name} ({sender.slug})")
+        state = sequence_mod.generate(
+            prospect_id, facts, daily_mod.draft_posts(posts),
+            brief=drafter_mod._shared_positioning(),
+            sign_off=sender.sign_off, direct=direct)
+        st.note("emails_drafted", len(state.touches))
+        for touch in state.touches:
+            st.note(f"email_{touch.number}",
+                    f"{touch.role}: {touch.words} words, "
+                    f"{len(touch.attempts)} attempt(s)")
+        if state.stopped:
+            st.status = trace.SKIP
+            st.why(state.stopped)
+        else:
+            st.why("each email drafted with the thread so far, through "
+                   "every drafter gate plus the cadence's own")
+
+    with run.step("VALIDATION") as st:
+        out_dir = ROOT / "data" / "sequences"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M")
+        slug = (facts.linkedin_url or str(prospect_id)).rstrip("/").rsplit("/", 1)[-1]
+        current = facts.positions[0] if facts.positions else None
+        prospect_label = ", ".join(filter(None, [
+            facts.full_name,
+            current.title if current else facts.headline,
+            facts.location]))
+        review = sequence_mod.render_review(
+            state, prospect_label=prospect_label,
+            sender_label=f"{sender.full_name}, {sender.company}",
+            campaign_label=f"{brief.name if brief else campaign_slug}")
+        md = out_dir / f"{slug}-{stamp}.md"
+        md.write_text(review, encoding="utf-8")
+        (out_dir / f"{slug}-{stamp}.json").write_text(
+            json.dumps(state.to_dict(), indent=2, ensure_ascii=False),
+            encoding="utf-8")
+        st.note("review", str(md))
+        st.why("the whole thread on one page, with what each email was "
+               "built on")
+    return state
+
+
 def _use_throwaway_db() -> Path:
     """Point every database write at a fresh temporary file.
 
@@ -119,7 +174,19 @@ def main() -> int:
                          "is written for a specific buyer, so a run using "
                          "this previews an email you would not actually "
                          "send. Test harness only.")
+    ap.add_argument("--sequence", action="store_true",
+                    help="Draft the eight-email cadence instead of one "
+                         "message, and write the whole thread to "
+                         "data/sequences/ for review. Needs --real-drafter. "
+                         "Refuses a prospect the campaign's ICP drops, and "
+                         "cannot be combined with --skip-geo/--skip-role.")
     args = ap.parse_args()
+    if args.sequence and not args.real_drafter:
+        ap.error("--sequence drafts eight emails with the live drafter; "
+                 "add --real-drafter")
+    if args.sequence and (args.skip_geo or args.skip_role):
+        ap.error("--sequence is for a genuinely qualified prospect; a "
+                 "bypassed ICP check previews a cadence you would not send")
 
     import logging
     logging.getLogger("linkedin").setLevel(logging.ERROR)
@@ -131,6 +198,7 @@ def main() -> int:
     from linkedin_agent import db, drafter as drafter_mod, trace
     from linkedin_agent import daily as daily_mod
     from linkedin_agent import evidence_context
+    from linkedin_agent import sequence as sequence_mod
     from linkedin_agent.trace import say
     from linkedin_agent.config import load as load_config
     from linkedin_agent.icp_scoring import CampaignICP, grade
@@ -142,6 +210,7 @@ def main() -> int:
     fallback = os.getenv("LINKEDIN_FALLBACK_PROVIDER") or None
 
     final_email: dict | None = None
+    sequence_state = None
     prospect_id: int | None = None
     drafted_subject: str | None = None
     aborted: str | None = None
@@ -256,6 +325,16 @@ def main() -> int:
                     meta, _ = campaigns_mod._parse_frontmatter(brief.path.read_text())
                     icp = CampaignICP.from_brief_meta(meta)
                     st.note("campaign", f"{brief.name} ({args.campaign})")
+                    # Attach it. Without this the drafter found no campaign
+                    # on the prospect and drafted with an empty brief and
+                    # the default sender, whatever --campaign said: the flag
+                    # only ever reached the ICP check.
+                    campaign_id = db.upsert_campaign(
+                        brief.slug, brief.name, str(brief.path),
+                        brief.target_icp)
+                    db.upsert_prospect(linkedin_url=linkedin_url,
+                                       campaign_id=campaign_id)
+                    st.note("campaign_attached", f"campaigns id={campaign_id}")
                 except FileNotFoundError:
                     icp = CampaignICP()
                     st.note("campaign", f"{args.campaign} (not found, using defaults)")
@@ -449,6 +528,20 @@ def main() -> int:
                     st.why(f"tier={bundle.tier.value}: facts may be referenced, "
                            f"but NO claim about their problems is licensed")
 
+            # ---- 11-12 THE CADENCE -------------------------------------
+            if args.sequence:
+                if not result.is_keeper:
+                    raise RuntimeError(
+                        "the campaign's ICP drops this prospect; a cadence "
+                        "is only drafted for someone the campaign would "
+                        "actually contact")
+                sequence_state = _run_sequence(
+                    run, trace, drafter_mod, sequence_mod, daily_mod,
+                    senders_mod, prospect_id=prospect_id, facts=facts,
+                    posts=posts, direct=direct, brief=brief,
+                    campaign_slug=args.campaign)
+                raise _SequenceDone()
+
             # ---- 11 DRAFTING --------------------------------------------
             body = None
             with run.step("MESSAGE_DRAFTING",
@@ -579,6 +672,8 @@ def main() -> int:
                 "subject": drafted_subject or evidence_mod.subject_for(facts, bundle),
                 "body": body,
             }
+        except _SequenceDone:
+            pass
         except Exception as exc:
             # A stage that dies must not take the summary with it. The first
             # run against this profile lost DNS mid-scrape and printed sixty
@@ -599,6 +694,20 @@ def main() -> int:
         "Fallback provider": fallback or "(none)",
         "Temp DB": str(tmp),
     }))
+
+    if sequence_state is not None:
+        say()
+        say("THE CADENCE")
+        for touch in sequence_state.touches:
+            say(f"--- email {touch.number} ({touch.role}, {touch.words} "
+                f"words) --- Subject: {touch.subject}")
+            for line in touch.body.splitlines():
+                say(f"  {line}")
+        if sequence_state.stopped:
+            say(f"STOPPED: {sequence_state.stopped}")
+        say()
+        say("NOT SENT. Email sending does not exist; the thread above is a")
+        say("draft for review.")
 
     if final_email:
         say()

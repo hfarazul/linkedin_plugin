@@ -21,3 +21,4 @@ venv/
 .DS_Store
 playwright_state/
 .pytest_cache/
+data/sequences/

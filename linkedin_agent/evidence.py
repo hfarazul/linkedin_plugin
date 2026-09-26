@@ -35,11 +35,23 @@ So facts are typed by what they license, not by where they came from:
                    claim, and the claim must stay tied to the signal that
                    licensed it.
 
-    HYPOTHESIS     A guess. Allowed only downstream of a SIGNAL, and only
-                   phrased as a guess.
+    HYPOTHESIS     Our guess, from their role or their time in it -- never
+                   from anything they said. Licenses a QUESTION, never a
+                   statement: "something I come across a lot with COOs is X
+                   -- is that true for you?" is licensed; "your team runs on
+                   spreadsheets" is not. Built only for the email cadence
+                   (`build_hypotheses`), never for a DM or a connect note.
+
+                   This slot was declared from the start and left empty, with
+                   the rule "only downstream of a SIGNAL". It was widened on
+                   purpose in 2026-09 for the GTM cadence, which asks for
+                   problems speculated from a role when there is no content:
+                   the speculation is allowed to exist, typed as what it is,
+                   and allowed to be asked about -- never asserted.
 
 The conversions below are the ones that produced the bad output and are
-therefore forbidden outright, not merely discouraged:
+therefore forbidden as CLAIMS, not merely discouraged. The cadence may turn
+the left side into a HYPOTHESIS; nothing may turn it into a statement:
 
     new job          -/->  scaling problem
     founder title    -/->  tooling problem
@@ -92,6 +104,7 @@ class Evidence:
     claim: str | None = None         # the ONLY claim this evidence permits
     name: str | None = None          # rule that produced it, for phrasing lookup
     authored: bool = True            # False: someone else's words they reposted
+    asks: str | None = None          # HYPOTHESIS only: the question it licenses
 
     def as_dict(self) -> dict:
         d = {"kind": self.kind.value, "statement": self.statement,
@@ -100,6 +113,9 @@ class Evidence:
             d["detail"] = self.detail
         if self.claim:
             d["permits_claim_about"] = self.claim
+        if self.kind is EvidenceKind.HYPOTHESIS:
+            d["name"] = self.name
+            d["licensed_only_as_a_question"] = self.asks
         return d
 
 
@@ -264,6 +280,12 @@ class EvidenceBundle:
         return self.of(EvidenceKind.VERIFIED_FACT)
 
     @property
+    def hypotheses(self) -> list[Evidence]:
+        """Our guesses. They license a question and nothing else: they never
+        set the tier and never license a claim about the prospect."""
+        return self.of(EvidenceKind.HYPOTHESIS)
+
+    @property
     def pain_claim_licensed(self) -> bool:
         """Whether ANY claim about this prospect's problems may be made.
 
@@ -298,6 +320,10 @@ class EvidenceBundle:
             "licensed_claims": [e.claim for e in self.items
                                 if e.licenses_pain_claim and e.claim],
         }
+        # Only when present, so every payload built before the cadence
+        # existed is unchanged.
+        if self.hypotheses:
+            payload["hypotheses"] = [e.as_dict() for e in self.hypotheses]
         if shape is not None:
             payload["shape"] = {"name": shape.name, "outline": shape.outline}
         if closing is not None:
@@ -604,8 +630,13 @@ def ungrounded_cortivo_claim(body: str,
     """Return the unsupported claim about Cortivo, or None if clean."""
     for sentence in re.split(r"(?<=[.!?])\s+|\n+", body):
         clean = sentence.strip()
-        if not clean or not re.search(r"(?i)\b(?:we|our|cortivo|i run|i'm at)\b",
-                                      clean):
+        # "I run" is here for "I run Agentic Labs". "I run into this a lot
+        # with COOs" is the sender describing what they see, which the
+        # cadence asks for by name; matched, it made "COOs" an invented
+        # proper noun and rejected the email.
+        if not clean or not re.search(
+                r"(?i)\b(?:we|our|cortivo|agentic labs|i run(?! into)|i'm at)\b",
+                clean):
             continue
 
         # An invented specific: a proper noun or figure we never claimed.
@@ -1084,3 +1115,256 @@ def _first_name(full_name: str | None) -> str | None:
         return None
     parts = full_name.strip().split()
     return parts[0] if parts else None
+
+
+# ------------------------------------------------------------- hypotheses
+#
+# The GTM cadence asks for problems speculated from a role when the prospect
+# has published little or nothing. That is the conversion the rest of this
+# module forbids as a claim, so it is allowed here only as a HYPOTHESIS: typed
+# as our guess, handed to the drafter as a question it may ask, and checked
+# afterwards so it never comes back as a statement about the person.
+#
+# Each guess is general -- what people in this seat often run into -- and says
+# nothing about this prospect until they answer. `terms` are the guess's own
+# words: in a sentence addressed to "you" that is not a question, they mean the
+# guess has become a claim, and the drafter rejects it.
+
+
+@dataclass(frozen=True)
+class RoleHypothesis:
+    name: str
+    roles: re.Pattern
+    problem: str                 # what people in this role often run into
+    asks: str                    # the question it licenses, as an intent
+    terms: tuple[str, ...]       # its own words: asserted about "you" = a claim
+    proof: tuple[str, ...]       # case studies in the brief that speak to it
+
+
+_OPS = (r"coo|chief operating|operations|operating officer|general manager|"
+        r"managing director")
+_EXEC = (r"founder|co-?founder|cofounder|ceo|chief executive|owner|president|"
+         r"managing director|principal")
+_TECH = (r"cto|chief technology|chief technical|vp,? (?:of )?engineering|"
+         r"head of (?:engineering|technology|data|ai)|director of engineering|"
+         r"engineering (?:manager|director|lead)|chief data|chief ai|architect")
+_FIN = r"cfo|chief financial|finance director|head of finance|financial controller"
+_MKT = (r"cmo|chief marketing|head of (?:marketing|growth|content)|"
+        r"marketing director|vp,? (?:of )?marketing|growth lead")
+_REV = (r"cro|chief revenue|head of sales|vp,? (?:of )?sales|sales director|"
+        r"revenue operations|revops")
+_PRODUCT = (r"cpo|chief product|head of product|vp,? (?:of )?product|"
+            r"director of product|product director")
+
+
+def _roles(*families: str) -> re.Pattern:
+    return re.compile(r"(?i)\b(?:" + "|".join(families) + r")\b")
+
+
+_ROLE_HYPOTHESES: tuple[RoleHypothesis, ...] = (
+    RoleHypothesis(
+        "manual_handoffs", _roles(_OPS, _EXEC),
+        "core processes that still run on spreadsheets, inboxes and manual "
+        "handoffs between teams",
+        "whether any of their day-to-day still runs that way",
+        ("spreadsheet", "manual", "handoff", "hand-off", "copy-past", "re-key",
+         "inbox"),
+        ("OrionQ",)),
+    RoleHypothesis(
+        "ai_pilots_stall", _roles(_OPS, _EXEC, _TECH, _PRODUCT),
+        "AI pilots that look good in a demo and never make it into daily "
+        "operations",
+        "whether they have run AI pilots, and how far they got",
+        ("pilot", "demo", "proof of concept", "poc", "never made it"),
+        ("Experial",)),
+    RoleHypothesis(
+        "reporting_by_hand", _roles(_OPS, _FIN),
+        "reporting that someone assembles by hand from several systems every "
+        "week or month",
+        "how their reporting gets put together today",
+        ("reporting", "report", "assembl", "by hand", "pulling numbers"),
+        ("Bespoke", "OrionQ")),
+    RoleHypothesis(
+        "ai_competes_for_engineers", _roles(_TECH, _PRODUCT),
+        "AI work on the roadmap competing with core product work for the same "
+        "engineers",
+        "how they are deciding who works on the AI side",
+        ("competing", "bandwidth", "same engineers", "backlog"),
+        ("Bespoke", "ChatForge")),
+    RoleHypothesis(
+        "prototype_stalls", _roles(_TECH, _PRODUCT),
+        "agent prototypes that work in a notebook and stall before they reach "
+        "production",
+        "whether any of their agents have stalled between prototype and "
+        "production",
+        ("prototype", "notebook", "stall"),
+        ("Bespoke", "Microforge")),
+    RoleHypothesis(
+        "month_end_by_hand", _roles(_FIN),
+        "month-end and board reporting stitched together by hand across "
+        "systems",
+        "how much of their month-end is still manual",
+        ("month-end", "month end", "reconcil", "stitched"),
+        ("Bespoke",)),
+    RoleHypothesis(
+        "content_takes_days", _roles(_MKT),
+        "content and campaign assets that take days per piece to produce",
+        "how long a typical campaign asset takes them today",
+        ("days per", "asset", "production time"),
+        ("Evergrow", "AI marketing tools", "AI Website Generator")),
+    RoleHypothesis(
+        "reps_on_admin", _roles(_REV),
+        "sellers spending hours on research and CRM upkeep instead of selling",
+        "how much of their team's week goes on research and CRM upkeep",
+        ("crm", "upkeep", "admin", "research"),
+        ("OrionQ",)),
+)
+
+# Everyone gets this one when nothing above matches. It asks where AI earns
+# its keep, which presumes no problem at all.
+_WHERE_AI_FITS = RoleHypothesis(
+    "where_ai_fits", re.compile(r""),
+    "working out where AI genuinely saves time and where it is noise",
+    "where, if anywhere, they have seen AI earn its keep",
+    ("hype", "noise"),
+    ())
+
+# The career angle, translated. The GTM brief asked whether a person is
+# "stuck in their career" and how to offer "a way out by being a hero". Time
+# in a role says where someone has been, not how they feel about it. So long
+# tenure licenses exactly one move -- asking whether AI implementation is a
+# lever they are looking at -- and the drafter rejects "stuck", "next chapter",
+# "hero", anything about their career, and any tenure figure.
+NEXT_LEVER = "next_lever"
+ROLE_TENURE_YEARS = 4
+EMPLOYER_TENURE_YEARS = 6
+
+
+def _catalogue_entry(name: str | None) -> RoleHypothesis | None:
+    for h in _ROLE_HYPOTHESES + (_WHERE_AI_FITS,):
+        if h.name == name:
+            return h
+    return None
+
+
+def hypothesis_terms(name: str | None) -> tuple[str, ...]:
+    entry = _catalogue_entry(name)
+    return entry.terms if entry else ()
+
+
+def hypothesis_proof(name: str | None) -> tuple[str, ...]:
+    entry = _catalogue_entry(name)
+    return entry.proof if entry else ()
+
+
+def _to_date(value: str | None):
+    from datetime import date
+    try:
+        return date.fromisoformat((value or "")[:10])
+    except ValueError:
+        return None
+
+
+def _employer_key(company: str | None) -> str:
+    words = [w for w in re.findall(r"[a-z0-9]+", (company or "").lower())
+             if w not in {"the", "group", "inc", "ltd", "limited"}]
+    return words[0] if words else ""
+
+
+def _tenure(positions, today) -> tuple[float | None, float | None]:
+    """(years in the current role, years continuously at this employer).
+
+    Continuity matters: someone who left an employer and came back years later
+    has not spent a long stretch there, and saying so would be false.
+    Positions arrive current-first, so the walk goes back in time and stops at
+    the first different employer or the first gap of more than a year.
+    """
+    usable = [p for p in positions
+              if (p.date_precision or "") in ("month", "day")
+              and _to_date(p.start_date)]
+    if not usable or not usable[0].is_current:
+        return None, None
+    current = usable[0]
+    start = _to_date(current.start_date)
+    role_years = (today - start).days / 365.25
+    key = _employer_key(current.company)
+    earliest = start
+    for prev in usable[1:]:
+        ended = _to_date(prev.end_date)
+        if _employer_key(prev.company) != key or ended is None:
+            break
+        if (earliest - ended).days > 366:
+            break
+        earliest = _to_date(prev.start_date)
+    return role_years, (today - earliest).days / 365.25
+
+
+def build_hypotheses(facts, *, today=None, limit: int = 4) -> list[Evidence]:
+    """Our guesses about what might matter to them, from role and tenure.
+
+    Never from their posts: what they wrote is an observation or a signal,
+    and a guess must not pass itself off as either.
+    """
+    from datetime import date
+    today = today or date.today()
+    positions = list(getattr(facts, "positions", None) or [])
+    current = positions[0] if positions and positions[0].is_current else None
+    titles = " ".join(filter(None, [
+        getattr(facts, "headline", None),
+        *[p.title for p in positions if p.is_current and p.title]]))
+
+    found: list[Evidence] = []
+    for h in _ROLE_HYPOTHESES:
+        if h.roles.search(titles) and len(found) < limit - 1:
+            found.append(Evidence(
+                kind=EvidenceKind.HYPOTHESIS,
+                statement=f"people in this role often run into {h.problem}",
+                source="our guess from their role, not anything they said",
+                name=h.name, asks=h.asks))
+    # Last for everyone, not only a fallback: it presumes no problem at all,
+    # which makes it the honest guess to reach for once the specific ones are
+    # used up.
+    found.append(Evidence(
+        kind=EvidenceKind.HYPOTHESIS,
+        statement=f"most people are still {_WHERE_AI_FITS.problem}",
+        source="our guess, not anything they said",
+        name=_WHERE_AI_FITS.name, asks=_WHERE_AI_FITS.asks))
+
+    lever = None
+    if current and current.company:
+        role_years, employer_years = _tenure(positions, today)
+        if ((role_years or 0) >= ROLE_TENURE_YEARS
+                or (employer_years or 0) >= EMPLOYER_TENURE_YEARS):
+            # No figure, deliberately. A number here reaches the drafter, and
+            # "eight years at AmTrust" in a cold email is a scraped detail
+            # that reads as surveillance and invites the career verdict.
+            lever = Evidence(
+                kind=EvidenceKind.HYPOTHESIS,
+                statement=(f"they have spent a long stretch building at "
+                           f"{current.company}; AI implementation may be a "
+                           f"lever they are weighing for the work they run"),
+                source="our guess from time in role; says nothing about how "
+                       "they feel about their career",
+                name=NEXT_LEVER,
+                asks="whether AI implementation is something they have been "
+                     "looking at as a lever for the work they run")
+    return found + [lever] if lever else found
+
+
+# ------------------------------------------------ citing our own work
+
+def proof_point_brief(name: str, brief: str) -> tuple[str, bool] | None:
+    """The brief's own entry for one case study, and whether it is published.
+
+    The drafter is handed this text verbatim, so it cites exactly what is
+    approved rather than its memory of it. `citable` is True only for work
+    published on theagenticlabs.ai; APPROVED work may be named, never linked.
+    """
+    text = _HTML_COMMENT.sub(" ", brief or "")
+    match = re.search(rf"^- \*\*{re.escape(name)}\*\*.*?(?=^- |^#|\Z)",
+                      text, re.M | re.S)
+    if not match:
+        return None
+    approved_at = text.find("APPROVED but not published")
+    citable = approved_at == -1 or match.start() < approved_at
+    return " ".join(match.group(0).split()), citable

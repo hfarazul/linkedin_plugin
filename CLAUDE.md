@@ -201,6 +201,25 @@ Stages that tell you the most: **07** (ICP scoring — should we contact them at
 
 `scripts/fingerprint_report.py <dir>` measures what a *batch* of drafts has in common. Every fingerprint this project has removed was invisible in a single draft and obvious in five.
 
+## The eight-email cadence
+
+Leadership's GTM brief asks for eight emails to one prospect: professional and direct, leading with the sender's authority, built on their LinkedIn activity where it exists and on their role where it does not, with at least three short follow-ups and a threaded subject. `linkedin_agent/sequence.py` drafts it as **one thread with state**, never eight independent drafts.
+
+```powershell
+.venv\Scripts\python.exe scripts\smoke_e2e.py --profile "https://www.linkedin.com/in/<slug>/" --campaign ops-leaders-ai-cadence --real-drafter --sequence
+```
+
+The whole thread lands in `data/sequences/<slug>-<stamp>.md` (plus `.json` state), gitignored because it holds a real person's details. `--sequence` refuses a prospect the campaign's ICP drops, and refuses `--skip-geo`/`--skip-role`.
+
+What the cadence does differently from the rest of the system, each enforced in code:
+
+- **A role-based problem is a `HYPOTHESIS`** (`evidence.build_hypotheses`) — our guess, typed as one. It licenses a *question* ("something I run into a lot with COOs is X — true for you?") and a pattern stated about other people. `hypothesis_as_fact` rejects the guess's own words said to "you" outside a question. It never sets the tier or licenses a claim.
+- **The career angle is never said back.** Long tenure (4+ years in role, or 6+ continuous at the employer) adds one guess, `next_lever`, which asks whether AI implementation is a lever they are looking at. `career_diagnosis` rejects "stuck", "next chapter", "hero", anything about their career, and any tenure figure. The guess itself carries no number.
+- **Content is rationed at selection, not caught afterwards.** Each main email is handed at most one piece of their activity, and the ledger never offers a piece already used in 3 emails or in the 2 emails before. An email's evidence holds only its piece, so a signal licenses a claim only in the email given the post that made it.
+- **It stops rather than pads.** With nothing fresh left for a main email, the thread ends there and says why.
+- **Case studies are cited from the brief verbatim**, each once, as the company's work ("we built", never "I built"), with no links.
+- Main emails are 80–119 words, follow-ups at most 50 and must ask a question, the first subject has their first name as word one or two, and no email may repeat a seven-word run from an earlier one.
+
 ## Campaign creation protocol — follow this every time
 
 ### Phase 1 — Clarifying questions (ask all 8)
@@ -287,7 +306,7 @@ All commands are `python -m linkedin_agent <subcommand>` (or `linkedin <subcomma
 PYTHONUTF8=1 PYTHONIOENCODING=utf-8 COLUMNS=200 .venv/Scripts/python.exe -m pytest -q
 ```
 
-663 passed, 7 deselected. The offline suite is hermetic by construction: `conftest.py` strips `PHANTOMBUSTER_*` / `LINKEDIN_PRIMARY_*` from the environment so a developer's `.env` cannot make the suite hit the network. Live tests are opt-in via markers.
+856 passed, 7 deselected. The offline suite is hermetic by construction: `conftest.py` strips `PHANTOMBUSTER_*` / `LINKEDIN_PRIMARY_*` from the environment so a developer's `.env` cannot make the suite hit the network. Live tests are opt-in via markers.
 
 ## Docs
 
