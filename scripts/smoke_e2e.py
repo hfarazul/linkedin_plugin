@@ -43,11 +43,34 @@ sys.path.insert(0, str(ROOT))
 # Imported at module scope, unlike the rest: _stub_email() is a module-level
 # function and the evidence module touches no database, so it does not need to
 # wait for LINKEDIN_DB_PATH the way db/drafter do.
+#
+# Nothing that imports `db` may join it here. `db` fixes DB_PATH the moment it
+# is first imported, and `evidence_context` imports it: for a while it sat on
+# this line, and every harness run wrote its prospects and drafts into the
+# real data/outreach.db instead of the throwaway one.
 from linkedin_agent import evidence as evidence_mod  # noqa: E402
-from linkedin_agent import evidence_context  # noqa: E402
 from linkedin_agent import senders as senders_mod  # noqa: E402
 
 TOTAL_STAGES = 12
+
+
+def _use_throwaway_db() -> Path:
+    """Point every database write at a fresh temporary file.
+
+    Setting LINKEDIN_DB_PATH is not enough on its own: `db` reads it once, at
+    import, so if anything imported `db` earlier the variable is ignored and
+    the run lands in the real database. On a deployment host that puts test
+    profiles in front of the hourly cron. So DB_PATH is also set directly —
+    `db.connect()` reads it on every call — and whatever imported `db` first
+    cannot redirect it.
+    """
+    tmp = Path(tempfile.gettempdir()) / "e2e_smoke.db"
+    if tmp.exists():
+        tmp.unlink()
+    os.environ["LINKEDIN_DB_PATH"] = str(tmp)
+    from linkedin_agent import db
+    db.DB_PATH = tmp
+    return tmp
 
 
 class RecordingTelegram:
@@ -102,13 +125,11 @@ def main() -> int:
     logging.getLogger("linkedin").setLevel(logging.ERROR)
     logging.getLogger("linkedin.providers").setLevel(logging.CRITICAL)
 
-    tmp = Path(tempfile.gettempdir()) / "e2e_smoke.db"
-    if tmp.exists():
-        tmp.unlink()
-    os.environ["LINKEDIN_DB_PATH"] = str(tmp)
+    _use_throwaway_db()
 
     from linkedin_agent import campaigns as campaigns_mod
     from linkedin_agent import db, drafter as drafter_mod, trace
+    from linkedin_agent import evidence_context
     from linkedin_agent.trace import say
     from linkedin_agent.config import load as load_config
     from linkedin_agent.icp_scoring import CampaignICP, grade
