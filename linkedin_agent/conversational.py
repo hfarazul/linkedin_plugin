@@ -41,7 +41,7 @@ _CLAUDE_TIMEOUT_SEC = 30
 
 
 SYSTEM_PROMPT = """\
-You are a LinkedIn outreach assistant integrated with Cortivo's outreach
+You are a LinkedIn outreach assistant integrated with Agentic Labs' outreach
 system. The user is messaging via Telegram and asking about the state of
 their outreach pipeline.
 

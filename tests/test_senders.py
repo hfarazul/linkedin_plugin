@@ -253,3 +253,19 @@ def test_the_sender_reaches_the_drafter_input(db_env, monkeypatch) -> None:
     assert inp.sender["name"] == "Manav"
     assert inp.sender["sign_off"].endswith("Agentic Labs")
     assert inp.sender["personal_seniority"]
+
+
+@pytest.mark.unit
+def test_nothing_the_model_reads_names_the_old_company() -> None:
+    """Agentic Labs was Cortivo. After the rename the prompt said Agentic Labs
+    while the shape outlines, the plain positioning angle and the retry hints
+    still told the model to "introduce Cortivo" — so a draft could come back
+    naming a company the prospect cannot find."""
+    from linkedin_agent import conversational
+
+    texts = {"drafter prompt": d._load_subagent_prompt(),
+             "telegram assistant prompt": conversational.SYSTEM_PROMPT}
+    texts.update({f"shape {s.name}": s.outline for s in evidence_mod._SHAPES})
+    texts.update({f"angle {a.name}": a.angle for a in evidence_mod._POSITIONING})
+    for where, text in texts.items():
+        assert "cortivo" not in text.lower(), f"{where} still says Cortivo"

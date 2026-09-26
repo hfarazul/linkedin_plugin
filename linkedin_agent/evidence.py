@@ -616,14 +616,14 @@ class EmailShape:
 _SHAPES: tuple[EmailShape, ...] = (
     EmailShape(
         "observation_question",
-        "The observation, then the ask. Introduce Cortivo in a half-sentence "
+        "The observation, then the ask. Introduce Agentic Labs in a half-sentence "
         "at most. Do NOT explain why the observation makes them relevant to "
         "us -- leave the connection unmade and let the question carry it. "
         "This should be the shortest email you write.",
     ),
     EmailShape(
         "observation_bridge_question",
-        "The observation, one plain sentence on what Cortivo does, the ask. "
+        "The observation, one plain sentence on what Agentic Labs does, the ask. "
         "No interpretation of their situation in between.",
     ),
     EmailShape(
@@ -799,7 +799,7 @@ _POSITIONING: tuple[Positioning, ...] = (
     ),
     Positioning(
         "plain",
-        "Say what Cortivo is in the plainest terms and stop. A stranger who "
+        "Say what Agentic Labs is in the plainest terms and stop. A stranger who "
         "has told us nothing is owed a short honest sentence, not a pitch "
         "angle chosen for them.",
         "nothing above fits -- this is the honest default, not a failure",

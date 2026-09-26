@@ -593,7 +593,7 @@ def render_prompt(inp: DrafterInput, retry_hint: str | None = None) -> str:
                if licensed else
                "NOTHING licenses a claim about this person's problems. Do "
                "not state, imply, or hedge one. Reference what is verified, "
-               "introduce Cortivo plainly, ask whether it is relevant.")
+               "introduce Agentic Labs plainly, ask whether it is relevant.")
             + f"\n\n{closing}"
         )
     if retry_hint:
@@ -936,7 +936,7 @@ def draft(
                     f"tooling or scaling problem — do not infer one from "
                     f"their job title, their employer, or the fact that they "
                     f"changed roles. Reference what is verified, introduce "
-                    f"Cortivo plainly, and ask whether it is relevant. A "
+                    f"Agentic Labs plainly, and ask whether it is relevant. A "
                     f"short honest email beats a confident wrong one."
                 )
                 continue
@@ -957,7 +957,7 @@ def draft(
                     f"You reasoned that from their job title, not from "
                     f"anything they said. At this evidence level the email is "
                     f"three things and no more: the one thing we verified, a "
-                    f"plain sentence on what Cortivo does, and the ask. Do "
+                    f"plain sentence on what Agentic Labs does, and the ask. Do "
                     f"not argue for relevance — ask about it."
                 )
                 continue
@@ -998,7 +998,7 @@ def draft(
             last_failure = f"ungrounded Cortivo claim {invented!r} (attempt {attempt})"
             last_body_preview = body
             retry_hint = (
-                f"Your previous attempt made a claim about Cortivo that the "
+                f"Your previous attempt made a claim about Agentic Labs that the "
                 f"brief does not support: {invented}. Do not describe our "
                 f"week, our process, our clients or our results beyond what "
                 f"the brief states, and do not mirror the prospect's own "
