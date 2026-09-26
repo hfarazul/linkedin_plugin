@@ -146,6 +146,53 @@ def test_the_unapproved_engagement_claims_are_licensed_for_nobody(sender, body) 
     assert d._contains_unsupported_authority(body, sender) is not None
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize("sender", [MANAV, HAQUE, None])
+@pytest.mark.parametrize("body", [
+    "A typical engagement is six-to-ten weeks.",
+    "Our engagements are six-to-ten weeks.",
+    "We usually ship in six to eight weeks.",
+    "We put a three-to-four person team on it.",
+    "We work as a 3 to 4-person team.",
+    "One of our engineers costs what you would otherwise pay three hires.",
+    "We have decades of combined engineering experience.",
+    "Our team has a twenty-year track record.",
+    "We bring 20+ years.",
+    "Our team has two-decade careers.",
+])
+def test_rewording_does_not_get_a_claim_past_the_gate(sender, body) -> None:
+    """Measured on 2026-09-26: against the literal lists alone, eight of these
+    got through both this gate and the brief-vocabulary gate. A hyphen, a plus
+    sign, a spelled-out number or one extra word was enough. None of them is
+    licensed for anyone — Manav's credential is his, so "our team has a
+    twenty-year track record" is false even when he sends."""
+    assert d._contains_unsupported_authority(body, sender) is not None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("body", [
+    "Could we find 15 minutes in the next two weeks?",
+    "We are 15+ developers across 10+ industries.",
+    "You have spent 12 years at Deloitte, which is a long run.",
+    "I have spent 5+ years building production AI.",
+    "We built Gymed, which goes from intake to plan in 60s.",
+    "Tango cut time-to-itinerary to 4 minutes for us.",
+])
+def test_catching_rewordings_does_not_catch_ordinary_sentences(body) -> None:
+    """The shapes are matched only in sentences about us, and a duration only
+    in a sentence about delivering work. An ask with a timeframe, the
+    prospect's own tenure, a published scale claim and Haque's documented
+    "5+ years" all stay sayable."""
+    assert d._contains_unsupported_authority(body, HAQUE) is None
+
+
+@pytest.mark.unit
+def test_manav_may_state_a_reworded_credential_in_the_first_person() -> None:
+    assert d._contains_unsupported_authority(
+        "I've had a two-decade run across sectors and leadership profiles.",
+        MANAV) is None
+
+
 # ===================== the catalogue may not contradict the brief ==========
 
 @pytest.mark.unit
@@ -164,6 +211,24 @@ def test_no_positioning_angle_instructs_an_unapproved_claim() -> None:
         assert found is None, (
             f"positioning angle {angle.name!r} instructs {found!r}, which the "
             f"approved brief does not permit")
+
+
+@pytest.mark.unit
+def test_the_prompt_does_not_instruct_an_unapproved_claim() -> None:
+    """The positioning catalogue had this problem, and so did the prompt: after
+    the brief marked both NOT APPROVED, the prompt still held up "a six-to-ten
+    week engagement" and "three or four people" as the brief's best unused
+    material, and told the drafter what to say for the removed
+    `engagement_shape` angle.
+
+    The prompt cannot be run through the gate whole — it has to name "two
+    decades" to explain the first-person rule — so this checks the phrasings
+    that are never legitimate in it."""
+    prompt = d._load_subagent_prompt().lower()
+    never = (d._COLLECTIVE_SENIORITY_TELLS + d._UNAPPROVED_ENGAGEMENT_TELLS
+             + ("six-to-ten", "engagement_shape", "small_team_equivalent"))
+    for phrase in never:
+        assert phrase not in prompt, f"the drafter prompt still says {phrase!r}"
 
 
 # ===================== reaching the prompt =================================

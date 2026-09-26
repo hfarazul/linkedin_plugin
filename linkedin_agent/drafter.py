@@ -294,9 +294,64 @@ _UNAPPROVED_ENGAGEMENT_TELLS = (
 
 _FIRST_PERSON_SINGULAR = re.compile(r"(?i)\b(?:i|i've|i'm|i'd|my|me)\b")
 
+# The literal lists above only catch the wordings someone thought of. Measured
+# against them on 2026-09-26, eight of nine rewordings of the same claims got
+# through both this gate and the brief-vocabulary gate: "six-to-ten weeks",
+# "a 3 to 4-person team", "20+ years", "a twenty-year track record",
+# "decades of combined engineering experience". A hyphen, a plus sign, a
+# spelled-out number or one extra word is all it took.
+#
+# So the text is folded into one spelling first, and the claims are matched as
+# shapes. Only sentences about US are checked: "you've spent 12 years at
+# Deloitte" is about the prospect, and is not ours to license or refuse here.
+_NUMBER_WORDS = {
+    "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+    "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
+    "eleven": "11", "twelve": "12", "fifteen": "15", "twenty": "20",
+    "thirty": "30",
+}
+_NUMBER_WORD = re.compile(r"\b(" + "|".join(_NUMBER_WORDS) + r")\b")
+# "engagement" counts: in a message from an agency, "a typical engagement"
+# is ours even with no pronoun in the sentence.
+_ABOUT_US = re.compile(r"\b(?:i|i've|i'm|i'd|my|me|we|we've|we're|we'd|our|"
+                       r"ours|us|team|agentic labs|engagements?)\b")
+_RANGE = r"\d+(?:\s*(?:to|or|-)\s*|\s+)\d+"
+
+# A duration only counts where the sentence is about delivering work. "Could
+# we find time in the next 2 weeks?" is an ask, not an engagement length.
+_DELIVERY_CONTEXT = re.compile(
+    r"\b(?:ship|ships|shipped|shipping|build|builds|built|deliver|delivers|"
+    r"delivered|engagements?|projects?|live|launch|launched|kickoff|kick off|"
+    r"v1|mvp|typical|typically|usually|turnaround|go from|went from)\b")
+_DURATION = re.compile(rf"\b(?:{_RANGE}|\d+)\s*(?:weeks?|months?)\b")
+_TEAM_RANGE = re.compile(
+    rf"\b{_RANGE}\s*(?:person|people|engineers?|developers?|devs|hires?)\b")
+_ONE_ENGINEER_EQUIVALENCE = re.compile(
+    r"\b1 (?:of our )?(?:engineers?|developers?)\b.{0,60}?"
+    r"\b(?:cost|costs|replaces?|instead of|worth|equivalent|would otherwise)\b")
+_COLLECTIVE = re.compile(r"\b(?:combined|collective|collectively|between us|"
+                         r"together we)\b")
+_SENIORITY_UNITS = re.compile(r"\b(?:years?|decades?|experience)\b")
+# Ten years or more, or any decade. Haque's documented "5+ years" is a sender
+# credential the brief-vocabulary gate already grounds, and stays sayable.
+_SENIORITY = re.compile(r"\b[1-9]\d\s*years?\b|\bdecades?\b")
+
+
+def _fold_authority_text(body: str) -> str:
+    """One spelling for the many a claim can hide behind."""
+    low = _normalise_quotes(body.lower())
+    low = re.sub(r"(?<=[a-z0-9])-(?=[a-z0-9])", " ", low)   # six-to-ten, 4-person
+    low = re.sub(r"(?<=\d)\s*\+", "", low)                   # 20+ years
+    low = _NUMBER_WORD.sub(lambda m: _NUMBER_WORDS[m.group(1)], low)
+    return re.sub(r"[ \t]+", " ", low)
+
+
+def _sentences(text: str) -> list[str]:
+    return [s for s in re.split(r"(?<=[.!?])\s+|\n+", text) if s.strip()]
+
 
 def _sentence_containing(text: str, phrase: str) -> str:
-    for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
+    for sentence in _sentences(text):
         if phrase in sentence:
             return sentence
     return text
@@ -322,6 +377,28 @@ def _contains_unsupported_authority(body: str,
             return phrase
         if not _FIRST_PERSON_SINGULAR.search(_sentence_containing(low, phrase)):
             return f"{phrase} (stated as the team's, not the sender's own)"
+
+    for sentence in _sentences(_fold_authority_text(body)):
+        if not _ABOUT_US.search(sentence):
+            continue
+        collective = _COLLECTIVE.search(sentence)
+        if collective and _SENIORITY_UNITS.search(sentence):
+            return f"{collective.group(0)} (a collective seniority claim)"
+        for pattern in (_TEAM_RANGE, _ONE_ENGINEER_EQUIVALENCE):
+            match = pattern.search(sentence)
+            if match:
+                return f"{match.group(0)} (a team-size equivalence)"
+        if _DELIVERY_CONTEXT.search(sentence):
+            match = _DURATION.search(sentence)
+            if match:
+                return f"{match.group(0)} (an engagement length)"
+        match = _SENIORITY.search(sentence)
+        if match:
+            if not licensed:
+                return f"{match.group(0)} (a seniority claim no source supports)"
+            if not _FIRST_PERSON_SINGULAR.search(sentence):
+                return (f"{match.group(0)} (stated as the team's, not the "
+                        f"sender's own)")
     return None
 
 
