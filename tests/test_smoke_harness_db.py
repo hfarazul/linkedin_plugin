@@ -63,3 +63,27 @@ def test_the_throwaway_database_wins_even_if_db_was_imported_first(
     assert db.DB_PATH == used
     assert db.DB_PATH != real
     assert Path(tempfile.gettempdir()) in used.parents
+
+
+@pytest.mark.integration
+def test_a_harness_run_writes_only_to_the_throwaway_database(tmp_path) -> None:
+    """End to end, offline: an unknown provider stops the run right after the
+    database is created, before anything touches the network. The configured
+    database must not be created, and the run must not crash on the way out
+    — the first version of this fix stopped assigning the path the closing
+    summary prints, and only a real run showed it."""
+    import os
+
+    configured = tmp_path / "configured.db"
+    env = dict(os.environ, LINKEDIN_DB_PATH=str(configured),
+               LINKEDIN_PRIMARY_PROVIDER="no-such-provider",
+               PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+    out = subprocess.run(
+        [sys.executable, str(HARNESS), "--profile",
+         "https://www.linkedin.com/in/nobody-harness-check/"],
+        capture_output=True, text=True, cwd=ROOT, env=env, timeout=120)
+    output = out.stdout + out.stderr
+
+    assert "schema initialised at e2e_smoke.db" in output
+    assert not configured.exists()
+    assert "Traceback" not in output, output[-2000:]
