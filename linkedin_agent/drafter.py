@@ -564,7 +564,7 @@ def render_prompt(inp: DrafterInput, retry_hint: str | None = None) -> str:
         if angle:
             domain = angle.get("proof_domain")
             closing = (
-                f"HOW TO INTRODUCE CORTIVO — {angle['name']}\n"
+                f"HOW TO INTRODUCE AGENTIC LABS — {angle['name']}\n"
                 f"Angle: {angle['angle']}\n"
                 f"Chosen because: {angle['fits_because']}.\n"
                 + (f"Their world resembles ours in: {domain}. Name the "
