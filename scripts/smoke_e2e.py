@@ -125,7 +125,7 @@ def main() -> int:
     logging.getLogger("linkedin").setLevel(logging.ERROR)
     logging.getLogger("linkedin.providers").setLevel(logging.CRITICAL)
 
-    _use_throwaway_db()
+    tmp = _use_throwaway_db()
 
     from linkedin_agent import campaigns as campaigns_mod
     from linkedin_agent import db, drafter as drafter_mod, trace
