@@ -269,3 +269,25 @@ def test_nothing_the_model_reads_names_the_old_company() -> None:
     texts.update({f"angle {a.name}": a.angle for a in evidence_mod._POSITIONING})
     for where, text in texts.items():
         assert "cortivo" not in text.lower(), f"{where} still says Cortivo"
+
+
+@pytest.mark.unit
+def test_the_rendered_prompt_does_not_name_the_old_company() -> None:
+    """The payload file was clean while render_prompt still headed the
+    positioning section "HOW TO INTRODUCE CORTIVO". Rendered with every
+    presentation choice attached, so every heading it can emit is checked."""
+    from linkedin_agent.evidence import build_evidence
+    from linkedin_agent.providers.capabilities import Position, ProfileFacts
+
+    facts = ProfileFacts(full_name="Sam Lee", headline="CTO", positions=[
+        Position(company="Northwind", title="CTO", start_date="2024-01-01",
+                 is_current=True, date_precision="month")])
+    bundle = build_evidence(facts, [{"text": "We're hiring engineers."}])
+    payload = bundle.as_dict(
+        shape=evidence_mod.choose_shape(bundle, "k"),
+        closing=evidence_mod.choose_closing("k"),
+        positioning=evidence_mod.choose_positioning(facts, bundle, "k"))
+    inp = d.DrafterInput(kind="email1", campaign={"brief": ""},
+                         prospect={}, evidence=payload, sender=MANAV)
+    rendered = d.render_prompt(inp, retry_hint=None)
+    assert "cortivo" not in rendered.lower()
