@@ -899,15 +899,22 @@ def render_prompt(inp: DrafterInput, retry_hint: str | None = None) -> str:
 def _invoke_claude(prompt: str, timeout: int = 90) -> str:
     """Run `claude -p` and return stdout. Separated for test stubbing.
 
-    stdin is explicitly closed via DEVNULL. Without this, in non-TTY contexts
-    (cron, launchd) claude waits 3s for stdin then in some cases exits 1
-    with empty stderr — the exact "claude -p exited 1" failure mode we kept
-    hitting. Interactive shells dodge this because stdin is a TTY."""
+    The prompt goes in on stdin, not as an argument. Windows caps a command
+    line at 32,767 characters, and the rendered prompt outgrew it: every draft
+    kind measured 32.6k-36.5k on 2026-09-26, and each one failed with
+    "[WinError 206] The filename or extension is too long" before claude ever
+    ran. macOS allows far more, so the deployment host never showed it.
+
+    Stdin still ends at once, which is what the old stdin=DEVNULL was for:
+    in non-TTY contexts (cron, launchd) claude waited 3s on an open stdin and
+    in some cases exited 1 with empty stderr. `input=` writes the prompt and
+    closes the pipe, so there is nothing to wait on."""
     claude_bin = shutil.which("claude")
     if not claude_bin:
         raise DrafterError("`claude` binary not on PATH — is Claude Code installed?")
     proc = subprocess.run(
-        [claude_bin, "-p", prompt, "--output-format", "text"],
+        [claude_bin, "-p", "--output-format", "text"],
+        input=prompt,
         capture_output=True,
         text=True,
         # The model emits UTF-8. Without this, text=True decodes with the
@@ -920,7 +927,6 @@ def _invoke_claude(prompt: str, timeout: int = 90) -> str:
         errors="replace",
         timeout=timeout,
         check=False,
-        stdin=subprocess.DEVNULL,
     )
     if proc.returncode != 0:
         raise DrafterError(
