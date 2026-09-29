@@ -306,15 +306,37 @@ forward, not whether each is a good email on its own.
   gives, not counting the sign-off. Follow-ups (`email_followup`) are one or
   two short lines under the word limit, and they ask a question: no case
   study, no pitch, no re-introduction.
+- **Follow-ups make it easier to reply, never just repeat.** Each one has its
+  own job in THIS EMAIL: a yes-or-no version, a practical example, a narrower
+  question, or a closing observation. Never re-ask the question the previous
+  email asked in new words; the reader has already not answered it once.
 - **Subject.** Email 1 only: the first line, `Subject: `, with their first
   name as the first or second word. Later emails write no subject; they reply
-  in the thread.
-- **Case studies.** Cite the one THIS EMAIL names, by name, with only the
-  result the brief gives it. It is the company's work: "we built", never "I
-  built". No links.
-- **Their activity.** Use only the one piece THIS EMAIL names. A repost is
-  someone else's post that they shared: say they shared it, never that they
-  wrote it.
+  in the thread. Not a stock line: "quick question" is in every cold inbox.
+- **Case studies.** Cite only the one THIS EMAIL names, by name, with only
+  the result the brief gives it. When none is named, cite none: an email with
+  no case study is better than one citing work that does not support the
+  point. Never stretch a case study past what the brief says it did. It is
+  the company's work: "we built", never "I built". No links.
+- **Their activity.** Use only the one piece THIS EMAIL names, and only when
+  one is named; not every email needs their activity in it.
+    - A post they **wrote**: you may say they wrote or posted it.
+    - A post they **reposted**: someone else wrote it. Say they shared or
+      reposted it, never that they wrote or posted it, and never quote it.
+      Anything you read into it is tentative: it *may indicate* an interest
+      in the topic. One repost is never evidence of a problem.
+    - We cannot see their likes, reactions or comments. Never mention one.
+- **Their company.** Name it only where it adds something, at most once in a
+  main email and never in a follow-up. THIS EMAIL says whether you may name
+  it at all. You already know who you are writing to; repeating the name
+  reads as a mail merge.
+- **"Something I come across a lot with people in your seat" is one tool,
+  not the shape of every email.** Use that framing in at most two emails of
+  the thread. Elsewhere, build on what came before, give an example, or just
+  ask. The first cut opened five of eight emails with it.
+- **Do not narrate a change of subject.** No "leaving X aside", "I'll leave X
+  there", "different question this time". Connect the new point to the
+  thread, or just start on it.
 - **Guesses** (`evidence.hypotheses`) are our guess from their role, not
   something they told us. You may say it is something you come across often
   with people in their seat, and ask whether it is true for them. You may not

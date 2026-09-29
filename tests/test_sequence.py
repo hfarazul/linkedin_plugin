@@ -162,16 +162,22 @@ def test_every_email_sees_the_whole_thread_before_it() -> None:
         assert [e["number"] for e in earlier] == list(range(1, i + 1))
 
 
+SALES_LONG = ProfileFacts(
+    full_name="Robin Hale", headline="Head of Sales at Kestrel",
+    positions=[_pos("Kestrel", "Head of Sales", "2019-03-01", current=True)])
+
+
 @pytest.mark.unit
-@pytest.mark.parametrize("facts", [COLIN, LONG_CTO], ids=["coo", "cto"])
+@pytest.mark.parametrize("facts", [COLIN, LONG_CTO, SALES_LONG],
+                         ids=["coo", "cto", "sales"])
 def test_no_case_study_or_guess_is_used_twice(facts) -> None:
-    """Two of a CTO's guesses point at the same case study (Bespoke), so this
-    is where reuse would show."""
+    """Every one of a long-tenured sales head's guesses is supported by the
+    same case study (OrionQ), so this is where reuse would show."""
     state, _ = _run(facts=facts)
     proofs = [t.proof_point for t in state.touches if t.proof_point]
     guesses = [t.hypothesis for t in state.touches
                if t.hypothesis and t.kind == seq.MAIN]
-    assert len(proofs) == len(set(proofs)) >= 3
+    assert len(proofs) == len(set(proofs))
     assert len(guesses) == len(set(guesses))
 
 
@@ -550,3 +556,220 @@ def test_the_harness_refuses_a_cadence_it_should_not_draft(extra, message) -> No
         capture_output=True, text=True, cwd=root, timeout=60)
     assert out.returncode == 2
     assert message in out.stderr
+
+
+
+# ============================== second cut: the review feedback ============
+#
+# The first cut, reviewed: two case studies cited for problems they do not
+# document solving, the company named in seven of eight emails, three main
+# emails announcing their own change of subject, and follow-ups that asked
+# the previous question again.
+
+
+@pytest.mark.unit
+def test_a_case_study_is_cited_only_where_it_is_documented_to_help() -> None:
+    """Experial is documented only as PILOTED, so it cannot prove "pilots that
+    never go live". Bespoke is a wealth-advisor copilot with no reporting
+    claim, so it cannot prove "manual reporting". Neither guess has a
+    documented case study, and neither gets one."""
+    assert ev.hypothesis_proof("ai_pilots_stall") == ()
+    assert ev.hypothesis_proof("reporting_by_hand") == ()
+    mapped = {name for h in ev._ROLE_HYPOTHESES for name in h.proof}
+    assert not mapped & {"Experial", "Bespoke"}
+
+
+@pytest.mark.unit
+def test_every_mapped_case_study_exists_in_the_brief() -> None:
+    mapped = {name for h in ev._ROLE_HYPOTHESES + (ev._WHERE_AI_FITS,)
+              for name in h.proof} | set(ev.hypothesis_proof(ev.NEXT_LEVER))
+    for name in mapped:
+        assert ev.proof_point_brief(name, BRIEF), f"{name} is not in the brief"
+
+
+@pytest.mark.unit
+def test_without_a_supported_case_study_the_email_cites_none() -> None:
+    """No fallback list. For Colin, emails 3 and 4 are built on guesses with
+    no documented case study, so they cite nothing; only email 6 does."""
+    state, stub = _run()
+    by_number = {c["touch"]["number"]: c["touch"] for c in stub.calls}
+    assert by_number[3]["proof_point"] is None
+    assert by_number[4]["proof_point"] is None
+    assert [t.proof_point for t in state.touches if t.proof_point] == ["OrionQ"]
+
+
+@pytest.mark.unit
+def test_the_opener_never_asks_the_drafter_to_pick_a_case_study() -> None:
+    """The proof-point angle says "name the closest thing we have built" — a
+    case study chosen by resemblance, which is what the fallback did."""
+    fund = ProfileFacts(
+        full_name="Ada Moss", headline="CEO at Birch Wealth Capital",
+        positions=[_pos("Birch Wealth Capital", "CEO", "2024-01-01",
+                        current=True)])
+    assert ev._fits(next(a for a in ev._POSITIONING if a.name == "proof_point"),
+                    fund, ev.build_evidence(fund, [])), "fixture must qualify"
+    _, stub = _run(facts=fund)
+    positioning = stub.calls[0]["evidence"].get("positioning") or {}
+    assert positioning.get("name") != "proof_point"
+
+
+@pytest.mark.unit
+def test_positioning_can_exclude_an_angle() -> None:
+    fund = ProfileFacts(full_name="Ada Moss", headline="CFO, wealth fund",
+                        positions=[])
+    bundle = ev.build_evidence(fund, [])
+    for key in map(str, range(30)):
+        assert ev.choose_positioning(fund, bundle, key,
+                                     exclude=("proof_point",)).name != "proof_point"
+
+
+# ---- company name ----------------------------------------------------------
+
+@pytest.mark.unit
+def test_the_company_budget_is_once_per_main_never_in_a_follow_up() -> None:
+    _, stub = _run()
+    for call in stub.calls:
+        company = call["touch"]["company"]
+        assert company["word"] == "amtrust"
+        expected = 1 if call["kind"] == seq.MAIN else 0
+        assert company["max_mentions"] <= expected
+
+
+@pytest.mark.unit
+def test_after_three_emails_name_the_company_no_more_may() -> None:
+    class NamesIt(StubDrafter):
+        def __call__(self, kind, prospect_id, **kw):
+            body = super().__call__(kind, prospect_id, **kw)
+            return body.replace("Hi Colin,", "Hi Colin, AmTrust", 1) \
+                if kw["touch"]["company"]["max_mentions"] else body
+
+    _, stub = _run(stub=NamesIt())
+    budgets = [c["touch"]["company"]["max_mentions"] for c in stub.calls
+               if c["kind"] == seq.MAIN]
+    assert budgets == [1, 1, 1, 0]
+
+
+@pytest.mark.unit
+def test_a_company_named_by_an_ordinary_word_is_not_policed() -> None:
+    """"Capital" or "Work" would match ordinary prose."""
+    generic = ProfileFacts(full_name="Jo Park", headline="COO",
+                           positions=[_pos("Capital Partners", "COO",
+                                           "2024-01-01", current=True)])
+    _, stub = _run(facts=generic)
+    assert all(c["touch"]["company"] is None for c in stub.calls)
+
+
+def _content_problem(body, touch_over=None, evidence=None):
+    touch = {"number": 3, "kind": seq.MAIN, "previous_emails": [],
+             "company": {"name": "AmTrust International", "word": "amtrust",
+                         "max_mentions": 1}}
+    touch.update(touch_over or {})
+    inp = d.DrafterInput(kind=touch["kind"], campaign={}, prospect={},
+                         sender={"sign_off": SIGN_OFF})
+    return d._cadence_content_problem(body, touch, inp, evidence, BRIEF)
+
+
+@pytest.mark.unit
+def test_naming_the_company_twice_in_a_main_email_is_retried() -> None:
+    twice = f"Hi Colin, at AmTrust the work at AmTrust is varied.\n\n{SIGN_OFF}"
+    once = f"Hi Colin, at AmTrust the work is varied.\n\n{SIGN_OFF}"
+    assert _content_problem(twice)[0] == "company_repetition"
+    assert _content_problem(once) is None
+
+
+@pytest.mark.unit
+def test_naming_the_company_in_a_follow_up_is_retried() -> None:
+    body = f"Hi Colin, is that true at AmTrust?\n\n{SIGN_OFF}"
+    problem = _content_problem(body, {"kind": seq.FOLLOWUP, "company": {
+        "name": "AmTrust International", "word": "amtrust",
+        "max_mentions": 0}})
+    assert problem[0] == "company_repetition"
+
+
+# ---- transitions -----------------------------------------------------------
+
+@pytest.mark.unit
+@pytest.mark.parametrize("opener", [
+    "Different question this time.",
+    "Leaving AI pilots aside, here is one I see often.",
+    "I'll leave reporting there.",
+    "Switching gears for a moment.",
+])
+def test_a_main_email_may_not_announce_a_change_of_subject(opener) -> None:
+    body = f"Hi Colin,\n\n{opener} Pilots stall a lot.\n\n{SIGN_OFF}"
+    assert _content_problem(body)[0] == "announced_transition"
+
+
+@pytest.mark.unit
+def test_the_last_note_may_leave_it_there() -> None:
+    body = f"Hi Colin, I'll leave it there. Worth a chat?\n\n{SIGN_OFF}"
+    assert _content_problem(body, {"kind": seq.FOLLOWUP, "number": 8}) is None
+
+
+# ---- follow-ups ------------------------------------------------------------
+
+@pytest.mark.unit
+def test_each_follow_up_has_its_own_job() -> None:
+    follow_ups = [p for p in seq.PLAN if p.kind == seq.FOLLOWUP]
+    assert len({p.role for p in follow_ups}) == len(follow_ups)
+    assert all("repeat" in p.brief or p.number == 8 for p in follow_ups)
+
+
+@pytest.mark.unit
+def test_no_brief_asks_for_a_case_study_unconditionally() -> None:
+    """The first cut's briefs said "cite the case study" whether or not one
+    had been assigned, inviting the drafter to supply its own."""
+    for plan in seq.PLAN:
+        if "case study" in plan.brief:
+            assert "if none is, cite none" in plan.brief
+
+
+# ---- activity we can and cannot see ----------------------------------------
+
+@pytest.mark.unit
+@pytest.mark.parametrize("body", [
+    "Saw you liked a post on claims automation.",
+    "Your reaction on that thread caught my eye.",
+    "You commented on a piece about underwriting.",
+])
+def test_likes_reactions_and_comments_are_never_mentioned(body) -> None:
+    """None of them is collected, so any mention describes something we
+    never saw."""
+    assert _content_problem(f"Hi Colin, {body}\n\n{SIGN_OFF}")[0] == \
+        "unseen_activity"
+
+
+@pytest.mark.unit
+def test_the_prompt_says_a_repost_is_shared_and_only_suggests_an_interest() -> None:
+    touch = {"number": 1, "of": 8, "kind": seq.MAIN, "role": "opener",
+             "brief": "", "words": {"min": 80, "max": 119}, "subject": None,
+             "content": {"id": "repost-1", "kind": "repost", "text": SHARED},
+             "hypothesis": None, "proof_point": None, "previous_emails": [],
+             "already_used": {}, "company": None}
+    block = d._touch_block(touch)
+    assert "REPOSTED" in block and "never that they wrote" in block
+    assert "may indicate an interest" in block
+    assert "never evidence of a problem" in block
+    own = d._touch_block({**touch, "content": {"id": "post-1", "kind": "post",
+                                               "text": OWN}})
+    assert "WROTE" in own and "REPOSTED" not in own
+
+
+@pytest.mark.unit
+def test_a_repost_opener_is_offered_as_a_repost_not_a_post() -> None:
+    _, stub = _run(posts=[{"text": SHARED, "is_repost": True}])
+    first = stub.calls[0]
+    assert first["touch"]["content"]["kind"] == "repost"
+    assert first["evidence"]["observations"] == []
+    assert [i["detail"] for i in first["evidence"]["interests"]] == [SHARED]
+    assert first["evidence"]["pain_claim_licensed"] is False
+
+
+
+@pytest.mark.unit
+def test_the_last_note_does_not_re_ask_the_lever_question() -> None:
+    """The second cut's email 8 asked email 6's question again in new words
+    ("has anything cleared that bar"): the close needs a question of its own."""
+    close = next(p for p in seq.PLAN if p.number == 8)
+    assert "no earlier email has asked" in close.brief
+    assert "not whether AI has helped" in close.brief

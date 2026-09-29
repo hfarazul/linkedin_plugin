@@ -948,14 +948,16 @@ def matching_proof_domain(facts, bundle: "EvidenceBundle") -> str | None:
 
 
 def choose_positioning(facts, bundle: "EvidenceBundle",
-                       key: str | None) -> Positioning:
+                       key: str | None, *,
+                       exclude: tuple[str, ...] = ()) -> Positioning:
     """The most relevant truthful angle, with the hash only breaking ties.
 
     An angle that does not fit is never eligible. Nothing here licenses a
     claim about the prospect -- it selects which true thing about US is worth
-    saying to them.
+    saying to them. `exclude` removes angles a caller cannot honour.
     """
-    eligible = [a for a in _POSITIONING if _fits(a, facts, bundle)]
+    eligible = [a for a in _POSITIONING
+                if a.name not in exclude and _fits(a, facts, bundle)]
     if not eligible:
         return _POSITIONING[-1]         # plain
     digest = hashlib.sha256(f"pos:{key or ''}".encode("utf-8")).digest()
@@ -1138,7 +1140,11 @@ class RoleHypothesis:
     problem: str                 # what people in this role often run into
     asks: str                    # the question it licenses, as an intent
     terms: tuple[str, ...]       # its own words: asserted about "you" = a claim
-    proof: tuple[str, ...]       # case studies in the brief that speak to it
+    # Case studies whose DOCUMENTED description supports this problem — not
+    # ones that merely sound related. Empty is a legitimate answer, and the
+    # email then cites nothing. Checked against campaigns/_agentic_labs.md and
+    # theagenticlabs.ai on 2026-09-29; each entry says what the brief shows.
+    proof: tuple[str, ...]
 
 
 _OPS = (r"coo|chief operating|operations|operating officer|general manager|"
@@ -1169,6 +1175,8 @@ _ROLE_HYPOTHESES: tuple[RoleHypothesis, ...] = (
         "whether any of their day-to-day still runs that way",
         ("spreadsheet", "manual", "handoff", "hand-off", "copy-past", "re-key",
          "inbox"),
+        # OrionQ: agents that integrate with existing software, -80% manual
+        # tasks. Manual work is exactly what it documents removing.
         ("OrionQ",)),
     RoleHypothesis(
         "ai_pilots_stall", _roles(_OPS, _EXEC, _TECH, _PRODUCT),
@@ -1176,21 +1184,29 @@ _ROLE_HYPOTHESES: tuple[RoleHypothesis, ...] = (
         "operations",
         "whether they have run AI pilots, and how far they got",
         ("pilot", "demo", "proof of concept", "poc", "never made it"),
-        ("Experial",)),
+        # Nothing. Experial was the first cut's choice, and the brief records
+        # only that it was PILOTED by Coca-Cola and Bosch: evidence of a
+        # pilot, not of one reaching daily use, so citing it here implied the
+        # opposite of what is documented.
+        ()),
     RoleHypothesis(
         "reporting_by_hand", _roles(_OPS, _FIN),
         "reporting that someone assembles by hand from several systems every "
         "week or month",
         "how their reporting gets put together today",
         ("reporting", "report", "assembl", "by hand", "pulling numbers"),
-        ("Bespoke", "OrionQ")),
+        # Nothing. Bespoke is a wealth-advisor copilot (SEC filings,
+        # portfolios, quant analysis) with no published result, and nothing
+        # in the brief says any of our work fixes manual reporting.
+        ()),
     RoleHypothesis(
         "ai_competes_for_engineers", _roles(_TECH, _PRODUCT),
         "AI work on the roadmap competing with core product work for the same "
         "engineers",
         "how they are deciding who works on the AI side",
         ("competing", "bandwidth", "same engineers", "backlog"),
-        ("Bespoke", "ChatForge")),
+        # Nothing documents freeing up an engineering team's capacity.
+        ()),
     RoleHypothesis(
         "prototype_stalls", _roles(_TECH, _PRODUCT),
         "agent prototypes that work in a notebook and stall before they reach "
@@ -1198,25 +1214,32 @@ _ROLE_HYPOTHESES: tuple[RoleHypothesis, ...] = (
         "whether any of their agents have stalled between prototype and "
         "production",
         ("prototype", "notebook", "stall"),
-        ("Bespoke", "Microforge")),
+        # Microforge: an agent pipeline "used by a16z, Sequoia, Elevation
+        # Capital and Accel" — a system real firms use, not a prototype.
+        ("Microforge",)),
     RoleHypothesis(
         "month_end_by_hand", _roles(_FIN),
         "month-end and board reporting stitched together by hand across "
         "systems",
         "how much of their month-end is still manual",
         ("month-end", "month end", "reconcil", "stitched"),
-        ("Bespoke",)),
+        # Nothing documented speaks to month-end or board reporting.
+        ()),
     RoleHypothesis(
         "content_takes_days", _roles(_MKT),
         "content and campaign assets that take days per piece to produce",
         "how long a typical campaign asset takes them today",
         ("days per", "asset", "production time"),
+        # Evergrow: seven agents running a live content pipeline, +7x organic
+        # traffic. AI marketing tools and AI Website Generator: asset and
+        # site creation cut from days to minutes.
         ("Evergrow", "AI marketing tools", "AI Website Generator")),
     RoleHypothesis(
         "reps_on_admin", _roles(_REV),
         "sellers spending hours on research and CRM upkeep instead of selling",
         "how much of their team's week goes on research and CRM upkeep",
         ("crm", "upkeep", "admin", "research"),
+        # OrionQ: built for revenue operations, -80% manual tasks.
         ("OrionQ",)),
 )
 
@@ -1227,7 +1250,9 @@ _WHERE_AI_FITS = RoleHypothesis(
     "working out where AI genuinely saves time and where it is noise",
     "where, if anywhere, they have seen AI earn its keep",
     ("hype", "noise"),
-    ())
+    # OrionQ's -80% manual tasks is a documented, measured case of AI earning
+    # its keep, which is the whole question.
+    ("OrionQ",))
 
 # The career angle, translated. The GTM brief asked whether a person is
 # "stuck in their career" and how to offer "a way out by being a hero". Time
@@ -1253,6 +1278,10 @@ def hypothesis_terms(name: str | None) -> tuple[str, ...]:
 
 
 def hypothesis_proof(name: str | None) -> tuple[str, ...]:
+    if name == NEXT_LEVER:
+        # The lever question is about AI implementation in the work they
+        # run; OrionQ's documented -80% manual tasks is that, measured.
+        return ("OrionQ",)
     entry = _catalogue_entry(name)
     return entry.proof if entry else ()
 

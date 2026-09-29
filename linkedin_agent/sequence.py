@@ -54,38 +54,50 @@ PLAN: tuple[TouchPlan, ...] = (
               "the email on the one thing named below, say plainly what "
               "Agentic Labs does, and end with a curious question.",
               "opener"),
-    TouchPlan(2, FOLLOWUP, "nudge",
-              "A short follow-up to email 1. One or two lines and a question. "
-              "It should read like a person bumping their own note, not a "
-              "second pitch.",
+    # Each follow-up has its own job, so none of them simply asks the email
+    # before it again. The first cut's follow-ups each restated the previous
+    # question almost word for word, which gives the reader nothing new to
+    # answer.
+    TouchPlan(2, FOLLOWUP, "a yes-or-no version",
+              "Make email 1 easier to answer: ask a yes-or-no question they "
+              "could answer in one word, about one narrow part of the same "
+              "problem. Do not repeat email 1's question.",
               "none"),
     TouchPlan(3, MAIN, "a pattern we see",
               "Raise the guess below as something you come across often with "
-              "people in their seat, cite the case study as a time it was "
-              "solved, and ask whether any of it is true for them. Do not "
-              "restate email 1.",
+              "people in their seat, and ask whether any of it is true for "
+              "them. If a case study is named below, cite it; if none is, "
+              "cite none.",
               "hypothesis"),
-    TouchPlan(4, MAIN, "a different angle",
-              "A different angle from email 3, built on what is named below, "
-              "with a different case study. Curious, not persuasive.",
+    TouchPlan(4, MAIN, "a related problem",
+              "Build on what is named below. Let it follow from the thread "
+              "so far rather than starting over. If a case study is named "
+              "below, cite it; if none is, cite none. Curious, not "
+              "persuasive.",
               "content"),
-    TouchPlan(5, FOLLOWUP, "nudge",
-              "A short follow-up to emails 3 and 4: one easy question about "
-              "them. No pitch.",
+    TouchPlan(5, FOLLOWUP, "a practical example",
+              "Give one concrete, everyday example of the problem from emails "
+              "3 and 4 (a specific task, a specific moment in the week), then "
+              "ask whether it looks familiar. An example of the pattern, not "
+              "a claim about them. Do not repeat either email's question.",
               "none"),
     TouchPlan(6, MAIN, "the lever",
               "Built on the guess below. Offer a way they could use AI "
-              "implementation, grounded in the case study, and ask whether it "
-              "is something they are looking at. Never say anything about "
-              "their career.",
+              "implementation and ask whether it is something they are "
+              "looking at. If a case study is named below, ground the offer "
+              "in it; if none is, cite none. Never say anything about their "
+              "career.",
               "lever"),
-    TouchPlan(7, FOLLOWUP, "one useful question",
-              "One genuinely useful question they could answer in a line, "
-              "about how they work. Nothing else.",
+    TouchPlan(7, FOLLOWUP, "a narrower question",
+              "Take one specific corner of email 6's topic and ask about just "
+              "that, in a line. Do not repeat email 6's question.",
               "none"),
     TouchPlan(8, FOLLOWUP, "closing the loop",
-              "The last note. Say so plainly, leave the door open, and ask "
-              "one easy question. No guilt and no pitch.",
+              "The last note. Say so plainly and leave the door open. Ask one "
+              "easy question that no earlier email has asked: whether the "
+              "timing is wrong, or whether someone else owns this, not "
+              "whether AI has helped or where it fits again. No guilt and no "
+              "pitch. Do not repeat an earlier email's question.",
               "none"),
 )
 
@@ -96,16 +108,16 @@ MAX_CONTENT_USES = 3
 # last note, which carries its own instruction instead.
 _MAIN_CLOSINGS = ("direct_offer", "usefulness", "overlap", "worth_it")
 
-# Case studies in rough order of how much a stranger can check them, used
-# after any the guess itself points at.
-_PROOF_ROTATION = ("OrionQ", "Evergrow", "Experial", "Gymed", "Tango",
-                   "Microforge", "Bespoke")
-_PROOF_BY_DOMAIN = {
-    "fintech, payments, wealth, investment": ("Bespoke",),
-    "enterprise, brand, consumer goods": ("Experial", "AI Website Generator"),
-    "venture capital and startup scouting": ("Microforge",),
-    "speed of delivery, campaign tooling": ("AI marketing tools", "Tango"),
-}
+# There is no fallback list of case studies. The first cut had one — when a
+# guess pointed at nothing, the next name on a fixed list, or one matched on
+# words in the prospect's industry, was cited anyway — and that is how
+# Experial ended up proving "pilots that never go live" and Bespoke proving
+# "manual reporting". A case study is cited only where the guess it supports
+# names it (evidence.hypothesis_proof); otherwise the email cites none.
+
+# The prospect's company, named where it adds something and not as a
+# mail-merge token: the first cut named it in seven of eight emails.
+MAX_COMPANY_EMAILS = 3
 
 
 # ------------------------------------------------------------------ state
@@ -266,10 +278,9 @@ def _choose_basis(plan, state_items, hypotheses, ledger, used_hyps, last_content
     return None, None
 
 
-def _choose_proof(hypothesis, domain, used, brief) -> tuple[str, str, bool] | None:
-    names = list(evidence_mod.hypothesis_proof(hypothesis.name if hypothesis else None))
-    names += list(_PROOF_BY_DOMAIN.get(domain or "", ()))
-    names += list(_PROOF_ROTATION)
+def _choose_proof(hypothesis, used, brief) -> tuple[str, str, bool] | None:
+    """A case study this email's guess is documented to support, or None."""
+    names = evidence_mod.hypothesis_proof(hypothesis.name if hypothesis else None)
     for name in names:
         if name in used:
             continue
@@ -291,8 +302,46 @@ def _choose_closing(key: str, touch: int, recent: list[str | None]):
     return options[start]
 
 
+# Company "names" that are ordinary words would match ordinary prose, and the
+# check would fire on "work" or "capital". Such a company is simply not
+# checked; the prompt instruction still applies.
+_COMMON_COMPANY_WORDS = {
+    "work", "labs", "group", "global", "capital", "partners", "solutions",
+    "services", "systems", "digital", "health", "consulting", "international",
+    "ventures", "holdings", "technologies", "tech", "media", "studio",
+}
+
+
+def _company_names(facts) -> dict | None:
+    """The company as the prospect's profile names it, plus the one word that
+    identifies it in prose ("AmTrust" for "AmTrust International")."""
+    positions = list(getattr(facts, "positions", None) or [])
+    current = positions[0] if positions and positions[0].is_current else None
+    name = (current.company if current and current.company
+            else getattr(facts, "company_name", None))
+    word = evidence_mod._employer_key(name)
+    if not name or len(word) < 3 or word in _COMMON_COMPANY_WORDS:
+        return None
+    return {"name": name, "word": word}
+
+
+def _names_company(body: str, company: dict | None) -> int:
+    return drafter_mod.company_mentions(body, (company or {}).get("word"))
+
+
+def _company_budget(company, kind, previous) -> dict | None:
+    """How often this email may name their company: once in a main email,
+    never in a follow-up, and in no email at all once MAX_COMPANY_EMAILS
+    earlier emails have named it."""
+    if not company:
+        return None
+    named = sum(1 for t in previous if _names_company(t.body, company))
+    allowed = 0 if kind == FOLLOWUP or named >= MAX_COMPANY_EMAILS else 1
+    return {**company, "max_mentions": allowed}
+
+
 def _touch_evidence(facts, direct, full, content, hypothesis, *,
-                    closing=None, positioning=None, domain=None) -> dict:
+                    closing=None, positioning=None) -> dict:
     """The evidence ONE email may draw on: the facts, plus only the piece of
     activity and the guess this email was given. Signals travel with the post
     that produced them, so a claim licensed by post A cannot surface in an
@@ -305,8 +354,7 @@ def _touch_evidence(facts, direct, full, content, hypothesis, *,
         bundle.items.append(hypothesis)
     # What we do not know is a fact about the prospect, not about this email.
     bundle.unknowns = list(full.unknowns)
-    return bundle.as_dict(closing=closing, positioning=positioning,
-                          proof_domain=domain)
+    return bundle.as_dict(closing=closing, positioning=positioning)
 
 
 # ------------------------------------------------------------ generation
@@ -337,7 +385,7 @@ def generate(prospect_id: int, facts, posts, *, brief: str,
 
     key = (getattr(facts, "provider_id", None)
            or getattr(facts, "linkedin_url", None) or str(prospect_id))
-    domain = evidence_mod.matching_proof_domain(facts, full)
+    company = _company_names(facts)
     ledger = ContentLedger(state.content_uses)
     used_hyps: set[str] = set()
     used_proofs: list[str] = []
@@ -358,10 +406,13 @@ def generate(prospect_id: int, facts, posts, *, brief: str,
             recent = [t.closing for t in state.touches[-2:]]
             closing = _choose_closing(key, n, recent)
             if n == 1:
-                positioning = evidence_mod.choose_positioning(facts, full,
-                                                              f"{key}:1")
-            if n > 1 or (positioning and positioning.name == "proof_point"):
-                proof = _choose_proof(hypothesis, domain, used_proofs, brief)
+                # Not the proof-point angle: it asks the drafter to "name the
+                # closest thing we have built", which is a case study picked
+                # by resemblance — the thing this cadence no longer does.
+                positioning = evidence_mod.choose_positioning(
+                    facts, full, f"{key}:1", exclude=("proof_point",))
+            else:
+                proof = _choose_proof(hypothesis, used_proofs, brief)
         else:
             # A follow-up asks about the email it follows. It carries that
             # email's guess, so the gate that keeps a guess a question
@@ -387,11 +438,11 @@ def generate(prospect_id: int, facts, posts, *, brief: str,
                                  "body": t.body} for t in state.touches],
             "already_used": {"case_studies": list(used_proofs),
                              "guesses": sorted(used_hyps)},
+            "company": _company_budget(company, plan.kind, state.touches),
         }
         evidence = _touch_evidence(
             facts, direct, full, content, hypothesis,
-            closing=closing, positioning=positioning,
-            domain=domain if positioning else None)
+            closing=closing, positioning=positioning)
         recent_posts = ([{"text": content.text, "posted_at": None,
                           "is_repost": content.kind == "repost"}]
                         if content else [])

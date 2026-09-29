@@ -602,6 +602,33 @@ def _repeats_previous_email(body: str, previous: Sequence[str],
 _LINK = re.compile(r"(?i)https?://|www\.|\b[a-z0-9-]+\.(?:ai|com|io)/\S")
 
 
+def company_mentions(body: str, word: str | None) -> int:
+    """How many times the email names the company, by its identifying word."""
+    if not word:
+        return 0
+    return len(re.findall(rf"(?i)\b{re.escape(word)}\b", email_text(body)))
+
+
+# A main email that announces it is changing the subject. The first cut had
+# three of four doing it — "Different question this time", "Leaving AI pilots
+# aside", "I'll leave reporting there" — and across a hundred prospects that
+# is a fingerprint. Only main emails are checked: "I'll leave it there" is a
+# natural way to end the last note.
+_ANNOUNCED_TRANSITION = re.compile(
+    r"(?i)\b(?:leaving\b.{0,40}\baside|(?:i'll|i will|let me|let's) leave\b"
+    r".{0,40}\bthere|set(?:ting)?\b.{0,30}\baside|different (?:question|angle|"
+    r"topic|note|tack)|switching gears|chang(?:e|ing) (?:tack|gears|the "
+    r"subject)|on (?:a|another) (?:different|separate) note|moving on|"
+    r"(?:another|separate|new) (?:question|topic) (?:this time|for you)|"
+    r"one more thing)\b")
+
+# Activity we cannot see. Likes, reactions and comments are not collected,
+# so an email mentioning one is describing something we never observed.
+_UNSEEN_ACTIVITY = re.compile(
+    r"(?i)\byou (?:liked|reacted to|upvoted|commented on|engaged with)\b|"
+    r"\byour (?:like|likes|reaction|reactions|comment|comments) on\b")
+
+
 def _contains_filler(body: str) -> str | None:
     """Return the recycled template phrase, or None if clean."""
     low = _normalise_quotes(body.lower())
@@ -772,15 +799,31 @@ def _touch_block(touch: dict) -> str:
                      "`Subject: `. Their first name must be the first or "
                      "second word. Short, plain, no marketing structure.")
     content = touch.get("content")
-    if content:
-        verb = ("they reposted it; someone else wrote it, so say they "
-                "shared it" if content.get("kind") == "repost"
-                else "they wrote it")
+    if content and content.get("kind") == "repost":
+        lines.append(
+            f"The one piece of their LinkedIn activity this email may use is "
+            f"a post they REPOSTED: {content.get('text')!r}. Someone else "
+            f"wrote it. Say they shared or reposted it, never that they "
+            f"wrote or posted it, and do not quote it or name its author. If "
+            f"you read anything into it, say it tentatively: it may indicate "
+            f"an interest in the topic (\"it made me wonder whether … is on "
+            f"your radar\"). One repost is never evidence of a problem. "
+            f"Mention no other post.")
+    elif content:
         lines.append(f"The one piece of their LinkedIn activity this email may "
-                     f"use ({verb}): {content.get('text')!r}. Mention no "
-                     f"other post.")
+                     f"use is a post they WROTE: {content.get('text')!r}. You "
+                     f"may say they wrote or posted it. Mention no other post.")
     else:
-        lines.append("Mention none of their posts in this email.")
+        lines.append("Mention none of their posts or activity in this email.")
+    company = touch.get("company")
+    if company:
+        if company.get("max_mentions"):
+            lines.append(f"You may name {company['name']} at most once in this "
+                         f"email, and only where it adds something. You "
+                         f"already know who they are; the name is not a "
+                         f"personalisation token.")
+        else:
+            lines.append(f"Do not name {company['name']} in this email.")
     themes = touch.get("content_themes")
     if themes:
         lines.append(f"Words that recur across what they share (counted, not "
@@ -1113,6 +1156,31 @@ def _cadence_content_problem(body: str, touch: dict, inp: DrafterInput,
                              evidence: dict | None, brief: str):
     """(category, reason, retry hint) for a cadence email that says something
     it may not, or None."""
+    company = touch.get("company") or {}
+    if company:
+        named = company_mentions(body, company.get("word"))
+        allowed = company.get("max_mentions", 1)
+        if named > allowed:
+            return ("company_repetition",
+                    f"{company.get('name')} named {named}x, allowed {allowed}",
+                    f"Your previous attempt named {company.get('name')} {named} "
+                    f"times; this email may name it {allowed} times. You "
+                    f"already know who they are. Say 'your team' or 'the "
+                    f"operation', or leave it out.")
+    unseen = _UNSEEN_ACTIVITY.search(body)
+    if unseen:
+        return ("unseen_activity", f"{unseen.group(0)!r}",
+                f"Your previous attempt mentioned {unseen.group(0)!r}. We do "
+                f"not collect likes, reactions or comments, so that is "
+                f"something we never saw. Remove it.")
+    if touch.get("kind") == "email_main":
+        moved = _ANNOUNCED_TRANSITION.search(email_text(body))
+        if moved:
+            return ("announced_transition", f"{moved.group(0)!r}",
+                    f"Your previous attempt announced a change of subject "
+                    f"({moved.group(0)!r}). A person moving a conversation on "
+                    f"does not narrate it. Connect to what came before, or "
+                    f"just start on the new point.")
     career = _contains_career_diagnosis(body)
     if career:
         return ("career_diagnosis", f"{career!r}",
