@@ -45,6 +45,7 @@ class TouchPlan:
     role: str
     brief: str
     basis: str          # what a main email is built on: see _choose_basis
+    job: str | None = None   # a follow-up's job: see drafter.followup_job_problem
 
 
 PLAN: tuple[TouchPlan, ...] = (
@@ -62,7 +63,7 @@ PLAN: tuple[TouchPlan, ...] = (
               "Make email 1 easier to answer: ask a yes-or-no question they "
               "could answer in one word, about one narrow part of the same "
               "problem. Do not repeat email 1's question.",
-              "none"),
+              "none", job="yes_no"),
     TouchPlan(3, MAIN, "a pattern we see",
               "Raise the guess below as something you come across often with "
               "people in their seat, and ask whether any of it is true for "
@@ -80,7 +81,7 @@ PLAN: tuple[TouchPlan, ...] = (
               "3 and 4 (a specific task, a specific moment in the week), then "
               "ask whether it looks familiar. An example of the pattern, not "
               "a claim about them. Do not repeat either email's question.",
-              "none"),
+              "none", job="example"),
     TouchPlan(6, MAIN, "the lever",
               "Built on the guess below. Offer a way they could use AI "
               "implementation and ask whether it is something they are "
@@ -91,14 +92,14 @@ PLAN: tuple[TouchPlan, ...] = (
     TouchPlan(7, FOLLOWUP, "a narrower question",
               "Take one specific corner of email 6's topic and ask about just "
               "that, in a line. Do not repeat email 6's question.",
-              "none"),
+              "none", job="narrower"),
     TouchPlan(8, FOLLOWUP, "closing the loop",
               "The last note. Say so plainly and leave the door open. Ask one "
               "easy question that no earlier email has asked: whether the "
               "timing is wrong, or whether someone else owns this, not "
               "whether AI has helped or where it fits again. No guilt and no "
               "pitch. Do not repeat an earlier email's question.",
-              "none"),
+              "none", job="close"),
 )
 
 MAX_CONTENT_USES = 3
@@ -439,6 +440,7 @@ def generate(prospect_id: int, facts, posts, *, brief: str,
             "already_used": {"case_studies": list(used_proofs),
                              "guesses": sorted(used_hyps)},
             "company": _company_budget(company, plan.kind, state.touches),
+            "job": plan.job,
         }
         evidence = _touch_evidence(
             facts, direct, full, content, hypothesis,
@@ -561,6 +563,17 @@ def render_review(state: SequenceState, *, prospect_label: str,
     lines.append(f"- Follow-ups, at most {drafter_mod.FOLLOWUP_MAX_WORDS} words "
                  f"and each asking a question: {len(follows)} — "
                  + ", ".join(f"email {t.number} ({t.words})" for t in follows))
+    jobs = {p.number: p.job for p in PLAN if p.job}
+    for t in follows:
+        job = jobs.get(t.number)
+        if job in drafter_mod.CHECKED_FOLLOWUP_JOBS:
+            problem = drafter_mod.followup_job_problem(t.body, job)
+            lines.append(f"- Email {t.number} follow-up job `{job}`: "
+                         + ("checked, passes" if problem is None
+                            else f"checked, FAILS ({problem})"))
+        elif job:
+            lines.append(f"- Email {t.number} follow-up job `{job}`: not "
+                         f"machine-checkable; read it")
     for item_id, used in sorted(state.content_uses.items()):
         lines.append(f"- `{item_id}` used in emails "
                      f"{', '.join(map(str, used))} (at most "

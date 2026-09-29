@@ -221,7 +221,7 @@ What the cadence does differently from the rest of the system, each enforced in 
 - **Own posts vs reposts.** "You wrote/posted" only for their own posts; a repost is "shared/reposted", read at most as a possible interest, never quoted, never a diagnosis. Likes, reactions and comments are not collected, and `unseen_activity` rejects any mention of one.
 - **The company is named at most once per main email, never in a follow-up, and in no more than three emails** (`company_repetition`). A company whose identifying word is an ordinary one ("Capital", "Work") is not policed.
 - **No narrated change of subject** in a main email (`announced_transition`: "leaving X aside", "I'll leave X there", "different question this time").
-- **Each follow-up has its own job** — a yes-or-no version, a practical example, a narrower question, a closing observation — so none just re-asks the previous question. No check can reliably catch a reworded repeat of a question; the assigned job is the mechanism, and the regenerated thread has to be read.
+- **Each follow-up has its own job** — a yes-or-no version, a practical example, a narrower question, a close — so none just re-asks the previous question. Two jobs have a deterministic signature and are checked (`followup_job`): the yes-or-no email must ask a closed question, and the close must say it is the last note and ask about timing or who owns this. The example and narrower-question jobs have none — telling them from a reworded repeat needs meaning, not pattern — so they rest on their instruction, and the review file says they were not checked. Read the regenerated thread.
 - Main emails are 80–119 words, follow-ups at most 50 and must ask a question, the first subject has their first name as word one or two, and no email may repeat a seven-word run from an earlier one.
 
 ## Campaign creation protocol — follow this every time
@@ -310,7 +310,7 @@ All commands are `python -m linkedin_agent <subcommand>` (or `linkedin <subcomma
 PYTHONUTF8=1 PYTHONIOENCODING=utf-8 COLUMNS=200 .venv/Scripts/python.exe -m pytest -q
 ```
 
-856 passed, 7 deselected. The offline suite is hermetic by construction: `conftest.py` strips `PHANTOMBUSTER_*` / `LINKEDIN_PRIMARY_*` from the environment so a developer's `.env` cannot make the suite hit the network. Live tests are opt-in via markers.
+894 passed, 7 deselected. The offline suite is hermetic by construction: `conftest.py` strips `PHANTOMBUSTER_*` / `LINKEDIN_PRIMARY_*` from the environment so a developer's `.env` cannot make the suite hit the network. Live tests are opt-in via markers.
 
 ## Docs
 

@@ -602,6 +602,65 @@ def _repeats_previous_email(body: str, previous: Sequence[str],
 _LINK = re.compile(r"(?i)https?://|www\.|\b[a-z0-9-]+\.(?:ai|com|io)/\S")
 
 
+# What each follow-up is for is set by the sequence plan. Two of the four jobs
+# have a signature a pattern can check without judging meaning:
+#
+#   yes_no  the email asks a closed question: one led by an auxiliary verb
+#           ("Is there...", "..., does it...") or an either/or ("email or a
+#           spreadsheet?")
+#   close   the last note says it is the last note, and asks about timing or
+#           who owns this. Both earlier drafts of Colin's email 8 failed
+#           exactly this: they asked email 6's question again.
+#
+# `example` and `narrower` are left unchecked on purpose. Telling an example
+# from a restated question, or a narrower question from the same one, needs
+# meaning rather than pattern, and a similarity score would pass or fail them
+# for reasons nobody could explain. They rest on their instruction, and the
+# review file says they were not checked.
+CHECKED_FOLLOWUP_JOBS = ("yes_no", "close")
+
+_CLOSED_QUESTION = re.compile(
+    r"(?i)(?:^|[,:;]\s*)(?:is|are|was|were|does|do|did|has|have|had|would|"
+    r"could|can|will|should)\b|\bor\b")
+_LAST_NOTE = re.compile(
+    r"(?i)\b(?:last|final) (?:note|email|message)\b|"
+    r"\bwon't (?:write|follow up|chase) again\b")
+_CLOSE_QUESTION = re.compile(
+    r"(?i)\b(?:time|timing|later|priority|someone else|somebody else|"
+    r"anyone else|right person|better person|who (?:else )?(?:owns|handles|"
+    r"looks after|runs|leads)|looks? after|close (?:this|the loop|it)|stop|"
+    r"park)\b")
+
+
+def followup_job_problem(body: str, job: str | None,
+                         sign_off: str | None = None) -> str | None:
+    """Why a follow-up fails its job's deterministic signature, or None.
+
+    Returns None for jobs with no deterministic signature (see above)."""
+    text = email_text(body, sign_off)
+    questions = [s.strip() for s in _sentences(text) if s.strip().endswith("?")]
+    if job == "yes_no":
+        if not any(_CLOSED_QUESTION.search(q) for q in questions):
+            return "no yes-or-no question"
+    elif job == "close":
+        if not _LAST_NOTE.search(text):
+            return "does not say it is the last note"
+        if not any(_CLOSE_QUESTION.search(q) for q in questions):
+            return "its question is not about timing or who owns this"
+    return None
+
+
+_FOLLOWUP_JOB_HINTS = {
+    "yes_no": ("This follow-up's job is a yes-or-no question they can answer "
+               "in one word. Ask one: start it with 'Is', 'Does', 'Do', 'Has' "
+               "or 'Would', or give them two options to pick between."),
+    "close": ("This is the last note. Say so plainly, and ask one question "
+              "about timing or ownership: whether now is the wrong time, or "
+              "whether someone else looks after this. Do not ask an earlier "
+              "email's question again."),
+}
+
+
 def company_mentions(body: str, word: str | None) -> int:
     """How many times the email names the company, by its identifying word."""
     if not word:
@@ -1138,6 +1197,11 @@ def _cadence_structure_problem(body: str, kind: str, touch: dict,
         return ("followup_without_question", "no question asked",
                 "A follow-up must ask a question. Keep it short and end on "
                 "one genuine question they could answer in a line.")
+    job = touch.get("job")
+    job_problem = followup_job_problem(body, job, sign_off)
+    if job_problem:
+        return ("followup_job", f"{job}: {job_problem}",
+                _FOLLOWUP_JOB_HINTS.get(job, "Do this follow-up's job."))
     if not touch.get("subject"):
         first = (inp.prospect or {}).get("first_name")
         problem = subject_problem(parse_email(body)[0], first)

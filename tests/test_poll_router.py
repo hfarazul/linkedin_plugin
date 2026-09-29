@@ -12,9 +12,29 @@ whose differences are the ones that can quietly corrupt state:
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from linkedin_agent.providers.capabilities import Capability, InboundMessage
+
+
+def _iso_ago(days: float) -> str:
+    """A provider timestamp `days` before now, in the Inbox Scraper's real
+    millisecond-precision shape ("2025-05-31T09:57:02.966Z").
+
+    These fixtures used fixed calendar dates, and they expired. `poll` treats
+    an inbound older than REPLY_DRAFT_MAX_AGE_DAYS (30) as backlog when we
+    have never written to the prospect, so a reply dated 2026-08-30 stopped
+    counting as a reply on 2026-09-29 and two tests failed with no code
+    change. Relative dates keep testing the behaviour the tests are about.
+    """
+    when = datetime.now(timezone.utc) - timedelta(days=days)
+    return when.strftime("%Y-%m-%dT%H:%M:%S.") + f"{when.microsecond // 1000:03d}Z"
+
+
+# A reply that arrived yesterday: well inside the window, whenever this runs.
+RECENT = _iso_ago(1)
 
 
 class FakeInboxProvider:
@@ -57,7 +77,7 @@ def _seed(db, provider_id="ACoPOLL1"):
 def _msg(**over):
     base = dict(
         external_id="abc123", prospect_provider_id="ACoPOLL1",
-        body="Thanks, happy to chat", sent_at="2026-08-30T09:57:02.966Z",
+        body="Thanks, happy to chat", sent_at=RECENT,
         thread_id="https://www.linkedin.com/messaging/thread/2-xyz/",
         is_from_me=False, source="phantombuster",
     )
@@ -98,7 +118,7 @@ def test_thread_id_and_provider_timestamp_are_stored(db_env) -> None:
         row = conn.execute(
             "SELECT sent_at, thread_id, channel, direction FROM messages "
             "WHERE prospect_id = ?", (pid,)).fetchone()
-    assert row["sent_at"] == "2026-08-30T09:57:02.966Z"
+    assert row["sent_at"] == RECENT
     assert row["thread_id"].endswith("2-xyz/")
     assert row["channel"] == "linkedin"
     assert row["direction"] == "inbound"
@@ -141,7 +161,7 @@ def test_a_later_reply_in_the_same_thread_is_recorded(db_env) -> None:
     _seed(db)
     _poll(_cfg(), FakeInboxProvider([_msg()]))
     later = _msg(external_id="def456", body="Following up",
-                 sent_at="2026-09-01T10:00:00.000Z")
+                 sent_at=_iso_ago(0.5))
     assert _poll(_cfg(), FakeInboxProvider([later])).new_inbound == 1
 
 
@@ -200,8 +220,8 @@ def test_messages_are_processed_oldest_first(db_env) -> None:
     the conversation actually happened."""
     from linkedin_agent import db
     pid = _seed(db)
-    newest = _msg(external_id="new", body="second", sent_at="2026-09-02T00:00:00Z")
-    oldest = _msg(external_id="old", body="first", sent_at="2026-09-01T00:00:00Z")
+    newest = _msg(external_id="new", body="second", sent_at=_iso_ago(1))
+    oldest = _msg(external_id="old", body="first", sent_at=_iso_ago(2))
     _poll(_cfg(), FakeInboxProvider([newest, oldest]))
 
     with db.connect() as conn:

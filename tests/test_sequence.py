@@ -773,3 +773,87 @@ def test_the_last_note_does_not_re_ask_the_lever_question() -> None:
     close = next(p for p in seq.PLAN if p.number == 8)
     assert "no earlier email has asked" in close.brief
     assert "not whether AI has helped" in close.brief
+
+
+
+# ============================== follow-up jobs, checked ====================
+#
+# Two jobs have a deterministic signature; two do not, and are left to their
+# instruction rather than to a similarity score.
+
+SECOND_CUT_EMAIL_8 = (
+    "Hi Colin,\n\nThis is my last note on this thread.\n\nTelling useful AI "
+    "apart from the noise is taking most operations leaders a while. Has "
+    "anything cleared that bar for you yet, even something small?\n\nIf now "
+    "isn't the time, that's fine. Happy to pick this up later.\n\n" + SIGN_OFF)
+THIRD_CUT_EMAIL_8 = (
+    "Hi Colin,\n\nThis is my last note, so I'll keep it short. Is now the "
+    "wrong time, or is this something someone else on your side looks after? "
+    "Either answer helps, and if it comes up later, my inbox is open.\n\n"
+    + SIGN_OFF)
+
+
+@pytest.mark.unit
+def test_each_follow_up_carries_its_job_and_mains_carry_none() -> None:
+    _, stub = _run()
+    jobs = {c["touch"]["number"]: c["touch"]["job"] for c in stub.calls}
+    assert jobs == {1: None, 2: "yes_no", 3: None, 4: None, 5: "example",
+                    6: None, 7: "narrower", 8: "close"}
+
+
+@pytest.mark.unit
+def test_the_close_that_re_asked_email_6_fails_its_job() -> None:
+    """The second cut's email 8 asked email 6's question again in new words.
+    Its only non-question mention of timing does not count."""
+    assert d.followup_job_problem(SECOND_CUT_EMAIL_8, "close", SIGN_OFF) == \
+        "its question is not about timing or who owns this"
+    assert d.followup_job_problem(THIRD_CUT_EMAIL_8, "close", SIGN_OFF) is None
+
+
+@pytest.mark.unit
+def test_the_close_must_say_it_is_the_last_note() -> None:
+    body = f"Hi Colin, is now the wrong time for this?\n\n{SIGN_OFF}"
+    assert d.followup_job_problem(body, "close", SIGN_OFF) == \
+        "does not say it is the last note"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("question, ok", [
+    ("Is there one handoff that still happens over email?", True),
+    ("To make it easy: when work moves teams, does it go by email?", True),
+    ("Email or a spreadsheet, mostly?", True),
+    ("What does your handoff process look like?", False),
+    ("How would you describe the way work moves between teams?", False),
+])
+def test_the_yes_or_no_follow_up_asks_a_closed_question(question, ok) -> None:
+    body = f"Hi Colin,\n\n{question}\n\n{SIGN_OFF}"
+    assert (d.followup_job_problem(body, "yes_no", SIGN_OFF) is None) is ok
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("job", ["example", "narrower", None])
+def test_jobs_without_a_signature_are_not_checked(job) -> None:
+    body = f"Hi Colin,\n\nWhat does your week look like?\n\n{SIGN_OFF}"
+    assert d.followup_job_problem(body, job, SIGN_OFF) is None
+
+
+@pytest.mark.unit
+def test_a_follow_up_failing_its_job_is_retried(monkeypatch) -> None:
+    open_q = f"Hi Colin, what does your handoff process look like?\n\n{SIGN_OFF}"
+    closed = f"Hi Colin, does most work still move between teams by email?\n\n{SIGN_OFF}"
+    touch = {**_touch(2, seq.FOLLOWUP), "job": "yes_no"}
+    body, tries, _ = _drive(monkeypatch, [open_q, closed], touch,
+                            kind=seq.FOLLOWUP)
+    assert tries[0].category == "followup_job"
+    assert body == closed
+
+
+@pytest.mark.unit
+def test_the_review_says_which_jobs_were_checked() -> None:
+    state, _ = _run()
+    review = seq.render_review(state, prospect_label="p", sender_label="s",
+                               campaign_label="c")
+    assert "Email 2 follow-up job `yes_no`: checked" in review
+    assert "Email 8 follow-up job `close`: checked" in review
+    assert "Email 5 follow-up job `example`: not machine-checkable" in review
+    assert "Email 7 follow-up job `narrower`: not machine-checkable" in review
